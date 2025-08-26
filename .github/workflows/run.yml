@@ -2,7 +2,7 @@ name: auto-download-bq
 
 on:
   schedule:
-    - cron: "0 0 * * *"    # 매일 09:00 KST 실행 (cron은 UTC 기준이므로 0 0 = KST 09:00)
+    - cron: "55 * * * *"   # 매 정각 55분(UTC 기준) → KST에서도 매시간 55분에 실행
   workflow_dispatch:        # 수동 실행 버튼
 
 jobs:

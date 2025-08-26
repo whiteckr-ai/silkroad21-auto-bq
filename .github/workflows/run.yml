@@ -1,0 +1,44 @@
+name: auto-download-bq
+
+on:
+  schedule:
+    - cron: "0 0 * * *"    # 매일 09:00 KST 실행 (cron은 UTC 기준이므로 0 0 = KST 09:00)
+  workflow_dispatch:        # 수동 실행 버튼
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 크롬 설치 (간편 액션)
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore GCP creds file
+        env:
+          SERVICE_ACCOUNT_JSON_B64: ${{ secrets.SERVICE_ACCOUNT_JSON_B64 }}
+        run: |
+          echo "$SERVICE_ACCOUNT_JSON_B64" | base64 -d > bigquery-credentials.json
+
+      - name: Run script
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/bigquery-credentials.json
+          LOGIN_ID: ${{ secrets.LOGIN_ID }}
+          LOGIN_PW: ${{ secrets.LOGIN_PW }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          BQ_DATASET: ${{ secrets.BQ_DATASET }}
+          BQ_TABLE: ${{ secrets.BQ_TABLE }}
+        run: |
+          python auto_download_headless_log.py

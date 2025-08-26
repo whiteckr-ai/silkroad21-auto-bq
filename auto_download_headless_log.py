@@ -17,8 +17,18 @@ from selenium.common.exceptions import TimeoutException, UnexpectedAlertPresentE
 from google.cloud import bigquery
 
 # ===== Stdout to log.txt (kept) =====
-sys.stdout = open("log.txt", "w", encoding="utf-8")
-sys.stderr = sys.stdout
+class DualLogger:
+    def __init__(self, filepath):
+        self.terminal = sys.__stdout__   # 원래 콘솔
+        self.log = open(filepath, "w", encoding="utf-8")
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+sys.stdout = sys.stderr = DualLogger("log.txt")
 
 # ===== Environment / Settings (GitHub Actions & Local both) =====
 RUNNER = os.getenv("GITHUB_ACTIONS") == "true"

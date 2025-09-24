@@ -1,15 +1,66 @@
 name: manual-upload
+
 on:
   push:
     paths:
       - "data/manual/**.csv"
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: "CSV 파일 URL(선택). 제공하면 이 URL에서 받아서 업로드"
+        required: false
+
+concurrency:
+  group: manual-upload
+  cancel-in-progress: true
+
 jobs:
   upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/gcp-sa.json
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11", cache: "pip" }
-      - run: pip install -r requirements.txt
-      - run: printf '%s' "${{ secrets.GCP_SA_KEY }}" > gcp-sa.json
-      - run: python scripts/upload_to_bigquery.py --input "${{ github.workspace }}/$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^data/manual/.*\\.csv$')"
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Write SA key
+        run: printf '%s' "${{ secrets.GCP_SA_KEY }}" > gcp-sa.json
+
+      - name: Resolve input file
+        id: resolve
+        shell: bash
+        run: |
+          set -e
+          mkdir -p data/manual
+          if [[ -n "${{ github.event.inputs.file_url }}" ]]; then
+            curl -L "${{ github.event.inputs.file_url }}" -o data/manual/input.csv
+            echo "path=data/manual/input.csv" >> "$GITHUB_OUTPUT"
+          else
+            CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^data/manual/.*\.csv$' || true)
+            if [[ -z "$CHANGED" ]]; then
+              CHANGED=$(ls -t data/manual/*.csv | head -1)
+            fi
+            echo "path=$CHANGED" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate & upload to BigQuery
+        run: |
+          python scripts/upload_to_bigquery.py --input "${{ steps.resolve.outputs.path }}"
+          # 필요 시 --dataset --table 등 기존 파라미터 이어붙이세요
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-run-logs
+          path: "**/*.log"
+          retention-days: 5

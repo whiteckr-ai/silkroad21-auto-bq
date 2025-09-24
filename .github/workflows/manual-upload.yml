@@ -1,0 +1,15 @@
+name: manual-upload
+on:
+  push:
+    paths:
+      - "data/manual/**.csv"
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: "pip" }
+      - run: pip install -r requirements.txt
+      - run: printf '%s' "${{ secrets.GCP_SA_KEY }}" > gcp-sa.json
+      - run: python scripts/upload_to_bigquery.py --input "${{ github.workspace }}/$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^data/manual/.*\\.csv$')"

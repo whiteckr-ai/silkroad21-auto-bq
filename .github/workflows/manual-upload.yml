@@ -64,3 +64,22 @@ jobs:
           name: manual-run-logs
           path: "**/*.log"
           retention-days: 5
+
+      - name: Locate uploader script
+        id: locate
+        run: |
+          set -e
+          CANDIDATES=$(git ls-files | grep -E '(upload.*bigquery|bigquery.*upload).*\.py$|scripts/upload_to_bigquery\.py' || true)
+          if [ -z "$CANDIDATES" ]; then
+            echo "No uploader script found" >&2
+            echo "힌트: repo 안에서 실제 파일 경로 확인하세요 (예: src/upload_to_bigquery.py)"
+            exit 1
+          fi
+          FIRST=$(echo "$CANDIDATES" | head -1)
+          echo "script=$FIRST" >> $GITHUB_OUTPUT
+          echo "Using $FIRST"
+
+      - name: Validate & upload to BigQuery
+        run: |
+          python "${{ steps.locate.outputs.script }}" --input "${{ steps.resolve.outputs.path }}"
+

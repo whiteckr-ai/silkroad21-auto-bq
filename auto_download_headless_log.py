@@ -63,24 +63,31 @@ LIST_URL  = "https://silkroad21.co.kr/Admin/Acting/Acting_S.asp?gMnu1=101&gMnu2=
 
 # ===== Helper functions =====
 def accept_alert_safe(driver, timeout: int = 3) -> bool:
-    try:
-        WebDriverWait(driver, timeout).until(EC.alert_is_present())
-        alert = driver.switch_to.alert
-        print("[ALERT]", alert.text)
-        alert.accept()
-        return True
-    except Exception:
-        return False
+    """알럿이 여러 번 뜨는 환경을 대비해서 연속 드레인."""
+    appeared = False
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            WebDriverWait(driver, 0.8).until(EC.alert_is_present())
+            alert = driver.switch_to.alert
+            print("[ALERT]", alert.text)
+            alert.accept()
+            appeared = True
+            time.sleep(0.2)
+        except Exception:
+            time.sleep(0.2)
+    return appeared
 
 
 def make_driver(headless: bool = True) -> webdriver.Chrome:
     options = webdriver.ChromeOptions()
     if headless:
-        options.add_argument("--headless=new")
+        options.add_argument("--headless=new")        # ✅ 안정
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")  # linux shared mem fix
+    options.add_argument("--disable-dev-shm-usage")   # ✅ runner 메모리 공유 이슈
     options.add_argument("--disable-gpu")
     options.add_argument("--remote-allow-origins=*")
+    options.add_argument("--window-size=1920,1080")
     options.add_experimental_option("prefs", {
         "download.default_directory": downloads_folder,
         "download.prompt_for_download": False,
@@ -94,15 +101,21 @@ def make_driver(headless: bool = True) -> webdriver.Chrome:
         options.binary_location = chrome_bin
 
     driver = webdriver.Chrome(options=options)
-    # Allow headless downloads (some envs require)
+
+    # ✅ 타임아웃 상향 (기존 ReadTimeout 120s 문제 대응)
+    driver.set_page_load_timeout(300)
+    driver.set_script_timeout(300)
+    driver.implicitly_wait(5)
+
+    # ✅ headless 다운로드 확실히 허용 (CDP)
     try:
         driver.execute_cdp_cmd(
             "Page.setDownloadBehavior",
             {"behavior": "allow", "downloadPath": downloads_folder}
         )
-    except Exception:
-        pass
-    driver.implicitly_wait(5)
+    except Exception as e:
+        print("[WARN] setDownloadBehavior 실패:", e)
+
     return driver
 
 
@@ -151,18 +164,87 @@ def goto_with_auth(driver: webdriver.Chrome, url: str, login_hint: str = "Login.
         driver.get(url)
 
 
-def wait_for_download_complete(dirpath: str, timeout: int = 180) -> None:
+def wait_for_download_complete(dirpath: str, timeout: int = 240) -> str:
+    """
+    - .crdownload 존재 → 다운로드 중
+    - .csv(또는 기타) 처음 생성되는 순간부터 완료까지 대기
+    """
     end = time.time() + timeout
     pattern_cr = os.path.join(dirpath, "*.crdownload")
-    pattern_csv = os.path.join(dirpath, "*.csv")
+    pattern_any = os.path.join(dirpath, "*")
+    first_seen = None
+
     while time.time() < end:
+        # 진행 중 파일(.crdownload) 있는지 체크
         if glob.glob(pattern_cr):
             time.sleep(0.8)
             continue
-        if glob.glob(pattern_csv):
-            return
+
+        files = [f for f in glob.glob(pattern_any) if not f.endswith(".crdownload")]
+        csvs = [f for f in files if f.lower().endswith(".csv")]
+        # 최초 생성 감지
+        if csvs and first_seen is None:
+            first_seen = max(csvs, key=os.path.getmtime)
+
+        # 완료 판정: 진행 중 없고, csv 존재
+        if csvs:
+            latest = max(csvs, key=os.path.getmtime)
+            # 파일 크기 안정화(마지막 1초간 크기 변화 없는지 확인)
+            size1 = os.path.getsize(latest)
+            time.sleep(1.0)
+            size2 = os.path.getsize(latest)
+            if size1 == size2:
+                return latest
+
         time.sleep(0.8)
+
     raise TimeoutError("다운로드 완료 대기 시간 초과")
+
+
+# === NEW: 내보내기 트리거를 안정적으로 수행 (클릭 우선 → JS 폴백, 재시도) ===
+def trigger_export_stably(driver: webdriver.Chrome, wait: WebDriverWait, max_attempts: int = 3) -> None:
+    """
+    1) 화면에서 흔한 내보내기 버튼 후보를 순차적으로 탐색하여 클릭
+    2) 실패 시 JS 함수(fnPageExl('X14')) 호출로 폴백
+    각 단계에서 알럿 처리 및 재시도
+    """
+    selectors = [
+        "#exportExcelBtn",
+        "a#exportExcelBtn",
+        "button#exportExcelBtn",
+        "button.excel, a.excel, input.excel",
+        "a[href*='Excel'], button[onclick*='Excel'], input[onclick*='Excel']",
+        "a[onclick*='fnPageExl'], button[onclick*='fnPageExl'], input[onclick*='fnPageExl']",
+    ]
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # 1) 클릭 방식 시도
+            for sel in selectors:
+                try:
+                    el = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                    print(f"[EXPORT] 클릭 시도(selector={sel})")
+                    el.click()
+                    time.sleep(0.5)
+                    accept_alert_safe(driver, timeout=1)
+                    return
+                except Exception:
+                    continue
+
+            # 2) JS 직접 호출 폴백
+            print("[EXPORT] JS 호출(fnPageExl('X14')) 시도")
+            driver.execute_script("fnPageExl('X14');")
+            time.sleep(0.5)
+            accept_alert_safe(driver, timeout=1)
+            return
+
+        except Exception as e:
+            print(f"[WARN] 내보내기 시도 {attempt}/{max_attempts} 실패:", repr(e))
+            accept_alert_safe(driver, timeout=1)
+            if attempt < max_attempts:
+                time.sleep(2.5)
+
+    raise RuntimeError("엑셀 내보내기 트리거 실패")
 
 
 # ===== Main =====
@@ -171,14 +253,36 @@ try:
     do_login(driver)
     goto_with_auth(driver, LIST_URL)
 
-    # Trigger export JS
-    driver.execute_script("fnPageExl('X14');")
-    accept_alert_safe(driver, timeout=2)  # ignore info alerts
+    # (선택) 테이블/리스트 로딩 대기 — 페이지 구조에 맞게 커스터마이즈
+    try:
+        wait = WebDriverWait(driver, 30)
+        # 흔한 리스트 영역 후보들 중 하나라도 로드되면 OK
+        any_loaded = False
+        for sel in ["#dataTable", ".list-table", "#divList", "table", ".grid"]:
+            try:
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                print(f"[READY] 리스트 로드 감지: {sel}")
+                any_loaded = True
+                break
+            except Exception:
+                continue
+        if not any_loaded:
+            print("[READY] 리스트 로드 신호를 못 찾았지만 계속 진행 (페이지 구조 미확인)")
+    except Exception as e:
+        print("[READY WARN] 리스트 대기 중 경고:", e)
+
+    # === 변경 포인트: 내보내기 트리거를 안정적으로 ===
+    trigger_export_stably(driver, WebDriverWait(driver, 20), max_attempts=3)
 
     # Wait for CSV
-    wait_for_download_complete(downloads_folder, timeout=180)
+    latest_file = wait_for_download_complete(downloads_folder, timeout=240)
+    print("⬇️ 다운로드 완료:", os.path.basename(latest_file))
+
 finally:
-    driver.quit()
+    try:
+        driver.quit()
+    except Exception:
+        pass
 
 # Keep newest file only
 csv_files = glob.glob(os.path.join(downloads_folder, "*.csv"))

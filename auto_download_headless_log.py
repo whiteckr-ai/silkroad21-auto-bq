@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, sys, time, glob, re
+import os, sys, time, glob, re, json, base64
 from pathlib import Path
 import pandas as pd
 from selenium import webdriver
@@ -84,12 +84,17 @@ def make_driver(headless=True):
     if chrome_bin:
         options.binary_location = chrome_bin
 
+    # ✅ 성능 로그(네트워크 이벤트) 활성화
+    perf_prefs = {"enableNetwork": True, "enablePage": False}
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+    options.set_capability("goog:perfLoggingPrefs", perf_prefs)
+
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(300)
     driver.set_script_timeout(300)
     driver.implicitly_wait(5)
 
-    # ✅ Page + Browser 다운로드 허용
+    # ✅ Page + Browser 다운로드 허용 (가능한 환경에선 그대로 동작)
     for cmd, params in [
         ("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": downloads_folder}),
         ("Browser.setDownloadBehavior", {"behavior": "allowAndName", "downloadPath": downloads_folder})
@@ -98,6 +103,13 @@ def make_driver(headless=True):
             driver.execute_cdp_cmd(cmd, params)
         except Exception as e:
             print(f"[WARN] {cmd} 실패:", e)
+
+    # ✅ CDP Network enable (응답 바디를 직접 가져오기 위함)
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+        driver.execute_cdp_cmd("Network.setCacheDisabled", {"cacheDisabled": True})
+    except Exception as e:
+        print("[WARN] Network.enable 실패:", e)
 
     return driver
 
@@ -167,7 +179,8 @@ def trigger_export_stably(driver, wait, max_attempts=3):
             time.sleep(2)
     raise RuntimeError("엑셀 내보내기 트리거 실패")
 
-def wait_for_download_complete(dirpath, timeout=300, before_set=None):
+# --- 기존 파일 감시 (여전히 쓰지만, 실패 시 CDP로 폴백) ---
+def wait_for_download_complete(dirpath, timeout=180, before_set=None):
     end = time.time() + timeout
     pattern_cr = os.path.join(dirpath, "*.crdownload")
     exts = (".csv", ".xls", ".xlsx", ".zip")
@@ -199,6 +212,83 @@ def wait_for_download_complete(dirpath, timeout=300, before_set=None):
         time.sleep(0.8)
     raise TimeoutError("다운로드 완료 대기 시간 초과")
 
+# --- ★ CDP 성능 로그로 '첨부파일 응답'을 잡아 저장 ---
+def cdp_capture_attachment_to_file(driver, out_dir, timeout=120):
+    """
+    성능 로그(performance log)에서 Network.responseReceived 이벤트를 훑어
+    Content-Disposition: attachment 가 포함된 응답을 찾고,
+    Network.getResponseBody 로 바디를 가져와 파일로 저장.
+    성공 시 저장된 파일 경로 반환.
+    """
+    start = time.time()
+    os.makedirs(out_dir, exist_ok=True)
+
+    def iter_perf_logs():
+        try:
+            logs = driver.get_log("performance")
+        except Exception:
+            return []
+        events = []
+        for entry in logs:
+            try:
+                msg = json.loads(entry.get("message", "{}")).get("message", {})
+                events.append(msg)
+            except Exception:
+                continue
+        return events
+
+    target_req_id = None
+    filename = None
+    mime_hint = None
+
+    while time.time() - start < timeout:
+        for ev in iter_perf_logs():
+            if ev.get("method") == "Network.responseReceived":
+                params = ev.get("params", {})
+                res = params.get("response", {})
+                headers = {k.lower(): v for k, v in (res.get("headers", {}) or {}).items()}
+                # 첨부파일 응답인지 확인
+                cd = headers.get("content-disposition", "") or headers.get("Content-Disposition".lower(), "")
+                if "attachment" in cd.lower():
+                    # 파일명 추출
+                    fname = "download.bin"
+                    m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^\";]+)"?', cd, flags=re.I)
+                    if m:
+                        fname = m.group(1)
+                    # 확장자 힌트
+                    ctype = headers.get("content-type", "")
+                    mime_hint = ctype
+                    target_req_id = params.get("requestId")
+                    filename = fname
+                    print(f"[CDP] attachment 응답 감지: requestId={target_req_id}, filename={filename}, content-type={ctype}")
+                    break
+        if target_req_id:
+            break
+        time.sleep(0.3)
+
+    if not target_req_id:
+        raise TimeoutError("CDP: 첨부파일 응답을 찾지 못했습니다.")
+
+    # 바디 가져오기
+    body = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": target_req_id})
+    data = body.get("body", "")
+    encoded = body.get("base64Encoded", False)
+    content = base64.b64decode(data) if encoded else data.encode("utf-8", errors="ignore")
+
+    # 파일 저장
+    # 확장자 없으면 mime 힌트로 보정
+    out_name = filename
+    if "." not in out_name and mime_hint:
+        if "csv" in mime_hint: out_name += ".csv"
+        elif "excel" in mime_hint or "spreadsheet" in mime_hint: out_name += ".xlsx"
+        elif "zip" in mime_hint: out_name += ".zip"
+
+    out_path = os.path.join(out_dir, out_name)
+    with open(out_path, "wb") as f:
+        f.write(content)
+    print(f"[CDP] 파일 저장 완료: {out_path}")
+    return out_path
+
 # ===== Main =====
 driver = make_driver(headless=True)
 try:
@@ -211,42 +301,81 @@ try:
             print(f"[READY] 리스트 로드 감지: {sel}")
             break
         except: continue
+
     before_set = set(glob.glob(os.path.join(downloads_folder, "*")))
+
+    # 1) 트리거(클릭→JS 폴백)
     trigger_export_stably(driver, WebDriverWait(driver, 20))
     switch_to_new_window_if_any(driver, 3)
+
+    # 2) 일반 다운로드 감시 (되면 그대로 진행)
     try:
-        latest_file = wait_for_download_complete(downloads_folder, 300, before_set)
+        latest_file = wait_for_download_complete(downloads_folder, 180, before_set)
+        print("⬇️ 다운로드 완료:", os.path.basename(latest_file))
     except TimeoutError as te:
+        print("[INFO] 일반 다운로드 감시 실패:", te)
+        # 3) 진척 없음이면 1회 JS 재트리거
         if str(te) == "NO_PROGRESS":
-            print("[RETRY] 다운로드 진척 없음 → JS 폴백 재트리거")
+            print("[RETRY] NO_PROGRESS → JS 폴백 재트리거")
             driver.execute_script("fnPageExl('X14');")
             accept_alert_safe(driver, 1)
             switch_to_new_window_if_any(driver, 3)
-            latest_file = wait_for_download_complete(downloads_folder, 300, before_set)
+            try:
+                latest_file = wait_for_download_complete(downloads_folder, 180, before_set)
+                print("⬇️ 다운로드 완료:", os.path.basename(latest_file))
+            except TimeoutError as te2:
+                print("[INFO] 재시도 후에도 일반 다운로드 실패:", te2)
+                # 4) 최종 폴백: CDP로 첨부파일 응답을 직접 저장
+                latest_file = cdp_capture_attachment_to_file(driver, downloads_folder, timeout=180)
         else:
-            raise
-    print("⬇️ 다운로드 완료:", os.path.basename(latest_file))
+            # 바로 CDP 폴백
+            latest_file = cdp_capture_attachment_to_file(driver, downloads_folder, timeout=180)
+
 finally:
     try: driver.quit()
     except: pass
 
 # ===== File clean & upload =====
-csv_files = glob.glob(os.path.join(downloads_folder, "*.csv")) + \
-             glob.glob(os.path.join(downloads_folder, "*.xls")) + \
-             glob.glob(os.path.join(downloads_folder, "*.xlsx"))
-if not csv_files:
+# csv/xls/xlsx/zip 중 최신 파일 선택
+cand_files = []
+for ext in ("*.csv", "*.xls", "*.xlsx", "*.zip"):
+    cand_files += glob.glob(os.path.join(downloads_folder, ext))
+if not cand_files:
     print("❌ 파일이 존재하지 않습니다.")
     sys.exit(1)
-latest_file = max(csv_files, key=os.path.getctime)
-for fp in csv_files:
-    if fp != latest_file:
-        os.remove(fp)
-        print("🗑 삭제됨:", os.path.basename(fp))
 
-try:
-    df = pd.read_csv(latest_file, encoding="utf-8-sig", dtype=str, on_bad_lines="skip")
-except Exception:
-    df = pd.read_csv(latest_file, encoding="cp949", dtype=str, on_bad_lines="skip")
+latest_file = max(cand_files, key=os.path.getctime)
+for fp in list(cand_files):
+    if fp != latest_file:
+        try:
+            os.remove(fp)
+            print("🗑 삭제됨:", os.path.basename(fp))
+        except Exception:
+            pass
+
+# ZIP이나 XLSX일 수도 있지만, 기존 파이프라인에 맞춰 CSV 우선 로딩 시도
+df = None
+load_err = None
+if latest_file.lower().endswith(".csv"):
+    try:
+        df = pd.read_csv(latest_file, encoding="utf-8-sig", dtype=str, on_bad_lines="skip")
+    except Exception as e1:
+        try:
+            df = pd.read_csv(latest_file, encoding="cp949", dtype=str, on_bad_lines="skip")
+        except Exception as e2:
+            load_err = (e1, e2)
+elif latest_file.lower().endswith((".xls", ".xlsx")):
+    try:
+        df = pd.read_excel(latest_file, dtype=str)
+    except Exception as e:
+        load_err = e
+else:
+    load_err = f"지원하지 않는 확장자: {latest_file}"
+
+if df is None:
+    print("❌ 데이터 로딩 실패:", load_err)
+    sys.exit(1)
+
 print(f"📊 데이터 로딩 완료: {len(df)} rows")
 
 def sanitize_columns(cols):

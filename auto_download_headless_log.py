@@ -64,6 +64,8 @@ def accept_alert_safe(driver, timeout=3):
     return appeared
 
 def make_driver(headless=True):
+    from selenium.webdriver.remote.remote_connection import RemoteConnection
+    RemoteConnection.set_timeout(300)  # 기본 120s → 여유
     options = webdriver.ChromeOptions()
     if headless:
         options.add_argument("--headless=new")
@@ -84,7 +86,7 @@ def make_driver(headless=True):
     if chrome_bin:
         options.binary_location = chrome_bin
 
-    # ✅ 성능 로그(네트워크 이벤트) 활성화
+    # 성능 로그(네트워크 이벤트) 활성화 (CDP 폴백용)
     perf_prefs = {"enableNetwork": True, "enablePage": False}
     options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     options.set_capability("goog:perfLoggingPrefs", perf_prefs)
@@ -94,7 +96,7 @@ def make_driver(headless=True):
     driver.set_script_timeout(300)
     driver.implicitly_wait(5)
 
-    # ✅ Page + Browser 다운로드 허용 (가능한 환경에선 그대로 동작)
+    # Page/Browser 다운로드 허용 (가능 환경에서 동작)
     for cmd, params in [
         ("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": downloads_folder}),
         ("Browser.setDownloadBehavior", {"behavior": "allowAndName", "downloadPath": downloads_folder})
@@ -104,7 +106,7 @@ def make_driver(headless=True):
         except Exception as e:
             print(f"[WARN] {cmd} 실패:", e)
 
-    # ✅ CDP Network enable (응답 바디를 직접 가져오기 위함)
+    # CDP Network enable
     try:
         driver.execute_cdp_cmd("Network.enable", {})
         driver.execute_cdp_cmd("Network.setCacheDisabled", {"cacheDisabled": True})
@@ -150,75 +152,157 @@ def switch_to_new_window_if_any(driver, wait_sec=3):
         time.sleep(0.2)
     return False
 
-def trigger_export_stably(driver, wait, max_attempts=3):
-    selectors = [
+# --- 다중 버튼 대비: 후보를 모아 우선순위대로 클릭 ---
+def trigger_export_stably(driver, wait, max_attempts=2):
+    # 1) 명시적 id 우선
+    priority_selectors = [
         "#exportExcelBtn",
         "a#exportExcelBtn",
         "button#exportExcelBtn",
+    ]
+    # 2) 흔한 클래스/속성
+    generic_selectors = [
         "button.excel, a.excel, input.excel",
         "a[href*='Excel'], button[onclick*='Excel'], input[onclick*='Excel']",
         "a[onclick*='fnPageExl'], button[onclick*='fnPageExl'], input[onclick*='fnPageExl']",
+        "a[download], button[download]",
     ]
+    # 3) 텍스트 기반 (엑셀/Excel/다운로드)
+    text_xpaths = [
+        "//a[normalize-space()[contains(., '엑셀') or contains(., 'Excel') or contains(., '다운로드')]]",
+        "//button[normalize-space()[contains(., '엑셀') or contains(., 'Excel') or contains(., '다운로드')]]",
+        "//input[@type='button' or @type='submit'][contains(@value,'엑셀') or contains(@value,'Excel') or contains(@value,'다운로드')]",
+    ]
+
+    def visible_and_enabled(el):
+        try:
+            return el.is_displayed() and el.is_enabled()
+        except Exception:
+            return False
+
+    def collect_candidates():
+        seen, candidates = set(), []
+        for sel in priority_selectors + generic_selectors:
+            try:
+                for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                    if el.id in seen: continue
+                    if visible_and_enabled(el):
+                        candidates.append(("css", sel, el))
+                        seen.add(el.id)
+            except Exception:
+                pass
+        for xp in text_xpaths:
+            try:
+                for el in driver.find_elements(By.XPATH, xp):
+                    if el.id in seen: continue
+                    if visible_and_enabled(el):
+                        candidates.append(("xpath", xp, el))
+                        seen.add(el.id)
+            except Exception:
+                pass
+        return candidates
+
+    last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
-            for sel in selectors:
+            # 우선 명시적 → 텍스트/onclick 순
+            cands = collect_candidates()
+            # 우선순위 재정렬: id우선, 그다음 onclick*fnPageExl, 그다음 텍스트
+            def score(item):
+                kind, spec, el = item
+                onclick = (el.get_attribute("onclick") or "").lower()
+                id_attr = (el.get_attribute("id") or "").lower()
+                text = (el.text or "").strip()
+                s = 0
+                if id_attr == "exportexcelbtn": s += 100
+                if "fnpageexl" in onclick: s += 50
+                if any(k in text for k in ("엑셀", "Excel", "다운로드")): s += 10
+                return -s
+            cands.sort(key=score)
+
+            for kind, spec, el in cands:
                 try:
-                    el = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
-                    print(f"[EXPORT] 클릭 시도({sel})")
+                    desc = f"{kind}:{spec}"
+                    print(f"[EXPORT] 클릭 시도({desc})")
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                    time.sleep(0.1)
                     el.click()
                     time.sleep(0.5)
                     accept_alert_safe(driver, 1)
                     return
-                except: continue
+                except Exception as e:
+                    last_error = e
+                    continue
+
+            # 후보가 하나도 없으면 JS 직접 호출
             print("[EXPORT] JS 호출(fnPageExl('X14')) 시도")
             driver.execute_script("fnPageExl('X14');")
             accept_alert_safe(driver, 1)
             return
         except Exception as e:
+            last_error = e
             print(f"[WARN] 내보내기 시도 {attempt} 실패:", e)
             time.sleep(2)
-    raise RuntimeError("엑셀 내보내기 트리거 실패")
+    raise RuntimeError(f"엑셀 내보내기 트리거 실패: {last_error}")
 
-# --- 기존 파일 감시 (여전히 쓰지만, 실패 시 CDP로 폴백) ---
-def wait_for_download_complete(dirpath, timeout=180, before_set=None):
-    end = time.time() + timeout
-    pattern_cr = os.path.join(dirpath, "*.crdownload")
-    exts = (".csv", ".xls", ".xlsx", ".zip")
-    def new_files():
-        files = glob.glob(os.path.join(dirpath, "*"))
-        if before_set: files = [f for f in files if f not in before_set]
-        return files
-    last_progress_ts = time.time()
-    observed_anything = False
-    while time.time() < end:
-        if glob.glob(pattern_cr):
-            observed_anything = True
-            last_progress_ts = time.time()
-            time.sleep(0.8)
-            continue
-        files = [f for f in new_files() if not f.endswith(".crdownload")]
-        cand = [f for f in files if os.path.splitext(f)[1].lower() in exts]
-        if cand:
-            latest = max(cand, key=os.path.getmtime)
-            sz1 = os.path.getsize(latest)
-            time.sleep(1)
-            sz2 = os.path.getsize(latest)
-            if sz1 == sz2:
-                return latest
+# --- 상태 기반 다운로드 감시 (mtime 의존 안 함) ---
+def wait_for_download_complete(folder: str, timeout: int = 300):
+    start = time.time()
+    baseline = set(os.listdir(folder))
+    last_sizes = {}
+    def list_cr():
+        return [f for f in os.listdir(folder) if f.endswith(".crdownload")]
+    def fsize(p):
+        try: return os.path.getsize(p)
+        except FileNotFoundError: return -1
+
+    while True:
+        # 새로 생긴 완성 파일 (ctime 기준) 우선 확인
+        curr = set(os.listdir(folder))
+        new_entries = curr - baseline
+        completed = [f for f in new_entries if not f.endswith(".crdownload")]
+        if completed:
+            candidates = sorted(
+                (os.path.join(folder, f) for f in completed),
+                key=lambda p: os.path.getctime(p),
+                reverse=True,
+            )
+            return candidates[0]
+
+        # 진행 중(.crdownload) 감시
+        crs = list_cr()
+        if crs:
+            progressed = False
+            for f in crs:
+                p = os.path.join(folder, f)
+                sz = fsize(p)
+                if p not in last_sizes or sz > last_sizes[p]:
+                    progressed = True
+                last_sizes[p] = sz
+            if progressed:
+                pass  # 계속 대기
             else:
-                last_progress_ts = time.time()
-        if time.time() - last_progress_ts > 5 and not observed_anything:
+                if time.time() - start > timeout:
+                    raise TimeoutError("DOWNLOAD_STALLED")
+        else:
+            # .crdownload 없음 → 시작 안 됐거나 이미 끝난 상태
+            complete_files = [f for f in os.listdir(folder) if not f.endswith(".crdownload")]
+            if complete_files:
+                recent = [os.path.join(folder, f) for f in complete_files
+                          if os.path.getctime(os.path.join(folder, f)) >= start]
+                if recent:
+                    return sorted(recent, key=os.path.getctime, reverse=True)[0]
+
+        if time.time() - start > timeout:
             raise TimeoutError("NO_PROGRESS")
-        time.sleep(0.8)
-    raise TimeoutError("다운로드 완료 대기 시간 초과")
+        time.sleep(1.0)
 
 # --- ★ CDP 성능 로그로 '첨부파일 응답'을 잡아 저장 ---
 def cdp_capture_attachment_to_file(driver, out_dir, timeout=120):
     """
-    성능 로그(performance log)에서 Network.responseReceived 이벤트를 훑어
-    Content-Disposition: attachment 가 포함된 응답을 찾고,
-    Network.getResponseBody 로 바디를 가져와 파일로 저장.
-    성공 시 저장된 파일 경로 반환.
+    performance log 의 Network.responseReceived 에서
+    Content-Disposition: attachment 응답을 찾아
+    Network.getResponseBody 로 바디를 저장.
     """
     start = time.time()
     os.makedirs(out_dir, exist_ok=True)
@@ -247,15 +331,11 @@ def cdp_capture_attachment_to_file(driver, out_dir, timeout=120):
                 params = ev.get("params", {})
                 res = params.get("response", {})
                 headers = {k.lower(): v for k, v in (res.get("headers", {}) or {}).items()}
-                # 첨부파일 응답인지 확인
-                cd = headers.get("content-disposition", "") or headers.get("Content-Disposition".lower(), "")
+                cd = headers.get("content-disposition", "")
                 if "attachment" in cd.lower():
-                    # 파일명 추출
                     fname = "download.bin"
                     m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^\";]+)"?', cd, flags=re.I)
-                    if m:
-                        fname = m.group(1)
-                    # 확장자 힌트
+                    if m: fname = m.group(1)
                     ctype = headers.get("content-type", "")
                     mime_hint = ctype
                     target_req_id = params.get("requestId")
@@ -269,14 +349,11 @@ def cdp_capture_attachment_to_file(driver, out_dir, timeout=120):
     if not target_req_id:
         raise TimeoutError("CDP: 첨부파일 응답을 찾지 못했습니다.")
 
-    # 바디 가져오기
     body = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": target_req_id})
     data = body.get("body", "")
     encoded = body.get("base64Encoded", False)
     content = base64.b64decode(data) if encoded else data.encode("utf-8", errors="ignore")
 
-    # 파일 저장
-    # 확장자 없으면 mime 힌트로 보정
     out_name = filename
     if "." not in out_name and mime_hint:
         if "csv" in mime_hint: out_name += ".csv"
@@ -302,33 +379,26 @@ try:
             break
         except: continue
 
-    before_set = set(glob.glob(os.path.join(downloads_folder, "*")))
-
-    # 1) 트리거(클릭→JS 폴백)
+    # 1) 트리거(여러 버튼/텍스트 후보 → 우선순위 클릭, 실패 시 JS 폴백)
     trigger_export_stably(driver, WebDriverWait(driver, 20))
     switch_to_new_window_if_any(driver, 3)
 
-    # 2) 일반 다운로드 감시 (되면 그대로 진행)
+    # 2) 상태 기반 다운로드 감시
+    latest_file = None
     try:
-        latest_file = wait_for_download_complete(downloads_folder, 180, before_set)
+        latest_file = wait_for_download_complete(downloads_folder, 300)
         print("⬇️ 다운로드 완료:", os.path.basename(latest_file))
     except TimeoutError as te:
         print("[INFO] 일반 다운로드 감시 실패:", te)
-        # 3) 진척 없음이면 1회 JS 재트리거
-        if str(te) == "NO_PROGRESS":
-            print("[RETRY] NO_PROGRESS → JS 폴백 재트리거")
-            driver.execute_script("fnPageExl('X14');")
-            accept_alert_safe(driver, 1)
-            switch_to_new_window_if_any(driver, 3)
-            try:
-                latest_file = wait_for_download_complete(downloads_folder, 180, before_set)
-                print("⬇️ 다운로드 완료:", os.path.basename(latest_file))
-            except TimeoutError as te2:
-                print("[INFO] 재시도 후에도 일반 다운로드 실패:", te2)
-                # 4) 최종 폴백: CDP로 첨부파일 응답을 직접 저장
-                latest_file = cdp_capture_attachment_to_file(driver, downloads_folder, timeout=180)
+        # 폴더에 혹시 이미 완성 파일이 있으면 그걸 채택
+        cand = []
+        for ext in ("*.csv", "*.xls", "*.xlsx", "*.zip"):
+            cand += glob.glob(os.path.join(downloads_folder, ext))
+        if cand:
+            latest_file = max(cand, key=os.path.getctime)
+            print("⬇️ 폴더 재검사로 파일 채택:", os.path.basename(latest_file))
         else:
-            # 바로 CDP 폴백
+            # 최종 폴백: CDP로 직접 저장
             latest_file = cdp_capture_attachment_to_file(driver, downloads_folder, timeout=180)
 
 finally:
@@ -353,7 +423,7 @@ for fp in list(cand_files):
         except Exception:
             pass
 
-# ZIP이나 XLSX일 수도 있지만, 기존 파이프라인에 맞춰 CSV 우선 로딩 시도
+# ZIP 처리 등은 필요 시 확장 가능. 우선 CSV/엑셀 로딩
 df = None
 load_err = None
 if latest_file.lower().endswith(".csv"):

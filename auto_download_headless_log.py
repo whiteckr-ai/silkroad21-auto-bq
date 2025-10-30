@@ -64,8 +64,6 @@ def accept_alert_safe(driver, timeout=3):
     return appeared
 
 def make_driver(headless=True):
-    from selenium.webdriver.remote.remote_connection import RemoteConnection
-    RemoteConnection.set_timeout(300)  # 기본 120s → 여유
     options = webdriver.ChromeOptions()
     if headless:
         options.add_argument("--headless=new")
@@ -95,6 +93,12 @@ def make_driver(headless=True):
     driver.set_page_load_timeout(300)
     driver.set_script_timeout(300)
     driver.implicitly_wait(5)
+
+    # (옵션) 내부 client_config timeout 확장: 버전에 따라 없을 수 있어 try/except
+    try:
+        driver.command_executor._client_config.timeout = 300  # 비공개 속성(실패해도 무시)
+    except Exception as e:
+        print("[WARN] client_config timeout 설정 실패:", e)
 
     # Page/Browser 다운로드 허용 (가능 환경에서 동작)
     for cmd, params in [
@@ -205,9 +209,8 @@ def trigger_export_stably(driver, wait, max_attempts=2):
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
-            # 우선 명시적 → 텍스트/onclick 순
             cands = collect_candidates()
-            # 우선순위 재정렬: id우선, 그다음 onclick*fnPageExl, 그다음 텍스트
+            # 우선순위: id > onclick*fnPageExl > 텍스트
             def score(item):
                 kind, spec, el = item
                 onclick = (el.get_attribute("onclick") or "").lower()
@@ -229,6 +232,12 @@ def trigger_export_stably(driver, wait, max_attempts=2):
                     el.click()
                     time.sleep(0.5)
                     accept_alert_safe(driver, 1)
+                    # 선택된 요소 로그(outerHTML 일부)
+                    try:
+                        html = driver.execute_script("return arguments[0].outerHTML;", el)
+                        print("[EXPORT] 선택 요소:", (html or "")[:300], "...")
+                    except Exception:
+                        pass
                     return
                 except Exception as e:
                     last_error = e
@@ -257,7 +266,6 @@ def wait_for_download_complete(folder: str, timeout: int = 300):
         except FileNotFoundError: return -1
 
     while True:
-        # 새로 생긴 완성 파일 (ctime 기준) 우선 확인
         curr = set(os.listdir(folder))
         new_entries = curr - baseline
         completed = [f for f in new_entries if not f.endswith(".crdownload")]
@@ -269,7 +277,6 @@ def wait_for_download_complete(folder: str, timeout: int = 300):
             )
             return candidates[0]
 
-        # 진행 중(.crdownload) 감시
         crs = list_cr()
         if crs:
             progressed = False
@@ -279,13 +286,9 @@ def wait_for_download_complete(folder: str, timeout: int = 300):
                 if p not in last_sizes or sz > last_sizes[p]:
                     progressed = True
                 last_sizes[p] = sz
-            if progressed:
-                pass  # 계속 대기
-            else:
-                if time.time() - start > timeout:
-                    raise TimeoutError("DOWNLOAD_STALLED")
+            if not progressed and time.time() - start > timeout:
+                raise TimeoutError("DOWNLOAD_STALLED")
         else:
-            # .crdownload 없음 → 시작 안 됐거나 이미 끝난 상태
             complete_files = [f for f in os.listdir(folder) if not f.endswith(".crdownload")]
             if complete_files:
                 recent = [os.path.join(folder, f) for f in complete_files
@@ -299,11 +302,6 @@ def wait_for_download_complete(folder: str, timeout: int = 300):
 
 # --- ★ CDP 성능 로그로 '첨부파일 응답'을 잡아 저장 ---
 def cdp_capture_attachment_to_file(driver, out_dir, timeout=120):
-    """
-    performance log 의 Network.responseReceived 에서
-    Content-Disposition: attachment 응답을 찾아
-    Network.getResponseBody 로 바디를 저장.
-    """
     start = time.time()
     os.makedirs(out_dir, exist_ok=True)
 

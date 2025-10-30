@@ -10,6 +10,17 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from google.cloud import bigquery
 
+# ===== 허용/차단 타입 =====
+ALLOWED_EXTS  = (".csv", ".xls", ".xlsx", ".zip")
+ALLOWED_MIMES = {
+    "text/csv",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/octet-stream",  # 서버가 종종 octet-stream으로 보냄
+}
+REJECT_EXTS   = {".txt"}
+REJECT_MIMES  = {"text/plain"}
+
 # ===== Stdout to log.txt =====
 class DualLogger:
     def __init__(self, filepath):
@@ -151,7 +162,7 @@ def switch_to_new_window_if_any(driver, wait_sec=3):
             for h in handles:
                 if h != base:
                     driver.switch_to.window(h)
-                    print("[WINDOW] 새 창 전환")
+                    print("[WINDOW] 새 창 전환]")
                     return True
         time.sleep(0.2)
     return False
@@ -170,16 +181,14 @@ def trigger_export_stably(driver, wait, max_attempts=2):
         (function(){
             var f = document.getElementById('frmSearch') || document.forms['frmSearch'];
             if(!f) throw new Error('frmSearch not found');
-            // 원래 값은 유지하고 action/method/target만 보정
             try { f.action = './Acting_X14.asp'; } catch(e) {}
             try { f.method = 'post'; } catch(e) {}
             if(!f.target || f.target === '') { f.target = '_self'; }
-            // 제출
             f.submit();
             return (f.action || '') + '|' + (f.method || '') + '|' + (f.target || '');
         })();
         """
-        info = driver.execute_script(js)  # "action|method|target" 형태
+        info = driver.execute_script(js)
         print("[EXPORT] frmSearch.submit() 호출:", info)
         time.sleep(0.5)
         accept_alert_safe(driver, 1)
@@ -243,7 +252,11 @@ def trigger_export_stably(driver, wait, max_attempts=2):
                 s = 0
                 if id_attr == "exportexcelbtn": s += 100
                 if "fnpageexl" in onclick: s += 50
-                if any(k in text for k in ("엑셀", "Excel", "다운로드")): s += 10
+                if any(k in text for k in ("엑셀", "excel", "다운로드")): s += 10
+                # TXT/텍스트 다운로드로 보이는 버튼은 패널티
+                if any(k in text.lower() for k in ("txt", "텍스트")): s -= 200
+                href = (el.get_attribute("href") or "").lower()
+                if "txt" in href: s -= 200
                 return -s
             cands.sort(key=score)
 
@@ -276,8 +289,8 @@ def trigger_export_stably(driver, wait, max_attempts=2):
     accept_alert_safe(driver, 1)
     return
 
-# --- 상태 기반 다운로드 감시 (mtime 의존 안 함) ---
-def wait_for_download_complete(folder: str, timeout: int = 300):
+# --- 상태 기반 다운로드 감시 (허용 확장자만) ---
+def wait_for_download_complete(folder: str, timeout: int = 300, allowed_exts: tuple = ALLOWED_EXTS):
     start = time.time()
     baseline = set(os.listdir(folder))
     last_sizes = {}
@@ -293,11 +306,13 @@ def wait_for_download_complete(folder: str, timeout: int = 300):
         completed = [f for f in new_entries if not f.endswith(".crdownload")]
         if completed:
             candidates = sorted(
-                (os.path.join(folder, f) for f in completed),
+                (os.path.join(folder, f) for f in completed
+                 if os.path.splitext(f)[1].lower() in allowed_exts),
                 key=lambda p: os.path.getctime(p),
                 reverse=True,
             )
-            return candidates[0]
+            if candidates:
+                return candidates[0]
 
         crs = list_cr()
         if crs:
@@ -311,7 +326,9 @@ def wait_for_download_complete(folder: str, timeout: int = 300):
             if not progressed and time.time() - start > timeout:
                 raise TimeoutError("DOWNLOAD_STALLED")
         else:
-            complete_files = [f for f in os.listdir(folder) if not f.endswith(".crdownload")]
+            complete_files = [f for f in os.listdir(folder)
+                              if (not f.endswith(".crdownload"))
+                              and (os.path.splitext(f)[1].lower() in allowed_exts)]
             if complete_files:
                 recent = [os.path.join(folder, f) for f in complete_files
                           if os.path.getctime(os.path.join(folder, f)) >= start]
@@ -322,8 +339,10 @@ def wait_for_download_complete(folder: str, timeout: int = 300):
             raise TimeoutError("NO_PROGRESS")
         time.sleep(1.0)
 
-# --- ★ CDP 성능 로그로 '첨부파일 응답'을 잡아 저장 ---
-def cdp_capture_attachment_to_file(driver, out_dir, timeout=120):
+# --- ★ CDP 성능 로그로 '첨부파일 응답'을 잡아 저장 (TXT 차단) ---
+def cdp_capture_attachment_to_file(driver, out_dir, timeout=120,
+                                   allowed_mimes: set = ALLOWED_MIMES,
+                                   allowed_exts: tuple = ALLOWED_EXTS):
     start = time.time()
     os.makedirs(out_dir, exist_ok=True)
 
@@ -351,16 +370,30 @@ def cdp_capture_attachment_to_file(driver, out_dir, timeout=120):
                 params = ev.get("params", {})
                 res = params.get("response", {})
                 headers = {k.lower(): v for k, v in (res.get("headers", {}) or {}).items()}
-                cd = headers.get("content-disposition", "")
+                cd = headers.get("content-disposition", "") or ""
+                ctype = (headers.get("content-type", "") or "").lower()
+
                 if "attachment" in cd.lower():
                     fname = "download.bin"
                     m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^\";]+)"?', cd, flags=re.I)
                     if m: fname = m.group(1)
-                    ctype = headers.get("content-type", "")
-                    mime_hint = ctype
+
+                    ext = "." + fname.split(".")[-1].lower() if "." in fname else ""
+                    # TXT/일반 텍스트는 즉시 무시
+                    if ctype in REJECT_MIMES or ext in REJECT_EXTS:
+                        print(f"[CDP] 무시(TXT/PLAIN): filename={fname}, content-type={ctype}")
+                        continue
+
+                    # 허용 판단: 확장자 또는 MIME
+                    is_allowed = (ext in allowed_exts) or any(allowed in ctype for allowed in allowed_mimes)
+                    if not is_allowed:
+                        print(f"[CDP] 무시(비허용 타입): filename={fname}, content-type={ctype}")
+                        continue
+
                     target_req_id = params.get("requestId")
                     filename = fname
-                    print(f"[CDP] attachment 응답 감지: requestId={target_req_id}, filename={filename}, content-type={ctype}")
+                    mime_hint = ctype
+                    print(f"[CDP] attachment(허용) 감지: requestId={target_req_id}, filename={filename}, content-type={ctype}")
                     break
         if target_req_id:
             break
@@ -403,13 +436,14 @@ try:
     trigger_export_stably(driver, WebDriverWait(driver, 20))
     switch_to_new_window_if_any(driver, 3)
 
-    # 2) 상태 기반 다운로드 감시
+    # 2) 상태 기반 다운로드 감시 (허용 확장자만)
     latest_file = None
     try:
-        latest_file = wait_for_download_complete(downloads_folder, 300)
+        latest_file = wait_for_download_complete(downloads_folder, 300, ALLOWED_EXTS)
         print("⬇️ 다운로드 완료:", os.path.basename(latest_file))
     except TimeoutError as te:
         print("[INFO] 일반 다운로드 감시 실패:", te)
+        # 폴더 재검사 (허용 확장자만)
         cand = []
         for ext in ("*.csv", "*.xls", "*.xlsx", "*.zip"):
             cand += glob.glob(os.path.join(downloads_folder, ext))
@@ -417,7 +451,11 @@ try:
             latest_file = max(cand, key=os.path.getctime)
             print("⬇️ 폴더 재검사로 파일 채택:", os.path.basename(latest_file))
         else:
-            latest_file = cdp_capture_attachment_to_file(driver, downloads_folder, timeout=180)
+            # CDP 폴백 (허용 타입만 수락)
+            latest_file = cdp_capture_attachment_to_file(
+                driver, downloads_folder, timeout=180,
+                allowed_mimes=ALLOWED_MIMES, allowed_exts=ALLOWED_EXTS
+            )
 
 finally:
     try: driver.quit()

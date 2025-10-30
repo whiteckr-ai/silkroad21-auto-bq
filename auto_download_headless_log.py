@@ -94,13 +94,13 @@ def make_driver(headless=True):
     driver.set_script_timeout(300)
     driver.implicitly_wait(5)
 
-    # (옵션) 내부 client_config timeout 확장: 버전에 따라 없을 수 있어 try/except
+    # (옵션) 내부 client_config timeout 확장(없어도 됨)
     try:
-        driver.command_executor._client_config.timeout = 300  # 비공개 속성(실패해도 무시)
+        driver.command_executor._client_config.timeout = 300
     except Exception as e:
         print("[WARN] client_config timeout 설정 실패:", e)
 
-    # Page/Browser 다운로드 허용 (가능 환경에서 동작)
+    # Page/Browser 다운로드 허용
     for cmd, params in [
         ("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": downloads_folder}),
         ("Browser.setDownloadBehavior", {"behavior": "allowAndName", "downloadPath": downloads_folder})
@@ -156,22 +156,47 @@ def switch_to_new_window_if_any(driver, wait_sec=3):
         time.sleep(0.2)
     return False
 
-# --- 다중 버튼 대비: 후보를 모아 우선순위대로 클릭 ---
+# --- 폼 제출로 다운로드 트리거 (frmSearch → Acting_X14.asp POST) ---
 def trigger_export_stably(driver, wait, max_attempts=2):
-    # 1) 명시적 id 우선
+    """
+    1순위: form#frmSearch (또는 name=frmSearch) action을 './Acting_X14.asp' 로 보정 후 submit()
+    2순위: 버튼 셀렉터/텍스트 클릭
+    3순위: JS 폴백 fnPageExl('X14')
+    """
+    # 1) 폼 직접 제출
+    try:
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "form#frmSearch, form[name='frmSearch']")))
+        js = r"""
+        (function(){
+            var f = document.getElementById('frmSearch') || document.forms['frmSearch'];
+            if(!f) throw new Error('frmSearch not found');
+            // 원래 값은 유지하고 action/method/target만 보정
+            try { f.action = './Acting_X14.asp'; } catch(e) {}
+            try { f.method = 'post'; } catch(e) {}
+            if(!f.target || f.target === '') { f.target = '_self'; }
+            // 제출
+            f.submit();
+            return (f.action || '') + '|' + (f.method || '') + '|' + (f.target || '');
+        })();
+        """
+        info = driver.execute_script(js)  # "action|method|target" 형태
+        print("[EXPORT] frmSearch.submit() 호출:", info)
+        time.sleep(0.5)
+        accept_alert_safe(driver, 1)
+        return
+    except Exception as e:
+        print("[WARN] 폼 직접 제출 실패, 버튼/JS 폴백 시도:", e)
+
+    # 2) (폴백) 버튼/텍스트 후보 클릭
     priority_selectors = [
-        "#exportExcelBtn",
-        "a#exportExcelBtn",
-        "button#exportExcelBtn",
+        "#exportExcelBtn", "a#exportExcelBtn", "button#exportExcelBtn",
     ]
-    # 2) 흔한 클래스/속성
     generic_selectors = [
         "button.excel, a.excel, input.excel",
         "a[href*='Excel'], button[onclick*='Excel'], input[onclick*='Excel']",
         "a[onclick*='fnPageExl'], button[onclick*='fnPageExl'], input[onclick*='fnPageExl']",
         "a[download], button[download]",
     ]
-    # 3) 텍스트 기반 (엑셀/Excel/다운로드)
     text_xpaths = [
         "//a[normalize-space()[contains(., '엑셀') or contains(., 'Excel') or contains(., '다운로드')]]",
         "//button[normalize-space()[contains(., '엑셀') or contains(., 'Excel') or contains(., '다운로드')]]",
@@ -210,7 +235,6 @@ def trigger_export_stably(driver, wait, max_attempts=2):
     for attempt in range(1, max_attempts + 1):
         try:
             cands = collect_candidates()
-            # 우선순위: id > onclick*fnPageExl > 텍스트
             def score(item):
                 kind, spec, el = item
                 onclick = (el.get_attribute("onclick") or "").lower()
@@ -226,13 +250,12 @@ def trigger_export_stably(driver, wait, max_attempts=2):
             for kind, spec, el in cands:
                 try:
                     desc = f"{kind}:{spec}"
-                    print(f"[EXPORT] 클릭 시도({desc})")
+                    print(f"[EXPORT] 버튼 클릭 시도({desc})")
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
                     time.sleep(0.1)
                     el.click()
                     time.sleep(0.5)
                     accept_alert_safe(driver, 1)
-                    # 선택된 요소 로그(outerHTML 일부)
                     try:
                         html = driver.execute_script("return arguments[0].outerHTML;", el)
                         print("[EXPORT] 선택 요소:", (html or "")[:300], "...")
@@ -242,17 +265,16 @@ def trigger_export_stably(driver, wait, max_attempts=2):
                 except Exception as e:
                     last_error = e
                     continue
-
-            # 후보가 하나도 없으면 JS 직접 호출
-            print("[EXPORT] JS 호출(fnPageExl('X14')) 시도")
-            driver.execute_script("fnPageExl('X14');")
-            accept_alert_safe(driver, 1)
-            return
         except Exception as e:
             last_error = e
-            print(f"[WARN] 내보내기 시도 {attempt} 실패:", e)
-            time.sleep(2)
-    raise RuntimeError(f"엑셀 내보내기 트리거 실패: {last_error}")
+            print(f"[WARN] 버튼 폴백 실패 시도 {attempt}:", e)
+            time.sleep(1.5)
+
+    # 3) 최후 폴백: 사이트 JS 직접 호출
+    print("[EXPORT] JS 폴백: fnPageExl('X14') 호출")
+    driver.execute_script("fnPageExl('X14');")
+    accept_alert_safe(driver, 1)
+    return
 
 # --- 상태 기반 다운로드 감시 (mtime 의존 안 함) ---
 def wait_for_download_complete(folder: str, timeout: int = 300):
@@ -377,7 +399,7 @@ try:
             break
         except: continue
 
-    # 1) 트리거(여러 버튼/텍스트 후보 → 우선순위 클릭, 실패 시 JS 폴백)
+    # 1) 폼 제출(우선) → 실패 시 버튼/JS 폴백
     trigger_export_stably(driver, WebDriverWait(driver, 20))
     switch_to_new_window_if_any(driver, 3)
 
@@ -388,7 +410,6 @@ try:
         print("⬇️ 다운로드 완료:", os.path.basename(latest_file))
     except TimeoutError as te:
         print("[INFO] 일반 다운로드 감시 실패:", te)
-        # 폴더에 혹시 이미 완성 파일이 있으면 그걸 채택
         cand = []
         for ext in ("*.csv", "*.xls", "*.xlsx", "*.zip"):
             cand += glob.glob(os.path.join(downloads_folder, ext))
@@ -396,7 +417,6 @@ try:
             latest_file = max(cand, key=os.path.getctime)
             print("⬇️ 폴더 재검사로 파일 채택:", os.path.basename(latest_file))
         else:
-            # 최종 폴백: CDP로 직접 저장
             latest_file = cdp_capture_attachment_to_file(driver, downloads_folder, timeout=180)
 
 finally:
@@ -404,7 +424,6 @@ finally:
     except: pass
 
 # ===== File clean & upload =====
-# csv/xls/xlsx/zip 중 최신 파일 선택
 cand_files = []
 for ext in ("*.csv", "*.xls", "*.xlsx", "*.zip"):
     cand_files += glob.glob(os.path.join(downloads_folder, ext))
@@ -421,7 +440,6 @@ for fp in list(cand_files):
         except Exception:
             pass
 
-# ZIP 처리 등은 필요 시 확장 가능. 우선 CSV/엑셀 로딩
 df = None
 load_err = None
 if latest_file.lower().endswith(".csv"):

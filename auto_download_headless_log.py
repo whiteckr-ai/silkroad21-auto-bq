@@ -1,5 +1,11 @@
 from __future__ import annotations
-import os, sys, time, glob, re, json, base64
+
+# ===== Imports =====
+import os
+import sys
+import time
+import glob
+import re
 from pathlib import Path
 import pandas as pd
 from selenium import webdriver
@@ -7,24 +13,15 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, UnexpectedAlertPresentException
 from google.cloud import bigquery
 
-# ===== 허용/차단 타입 =====
-ALLOWED_EXTS  = (".csv", ".xls", ".xlsx", ".zip")
-ALLOWED_MIMES = {
-    "text/csv",
-    "application/vnd.ms-excel",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/octet-stream",  # 서버가 종종 octet-stream으로 보냄
-}
-REJECT_EXTS   = {".txt"}
-REJECT_MIMES  = {"text/plain"}
-
-# ===== Stdout to log.txt =====
+# ===== Stdout to log.txt (kept) =====
+sys.stdout = open("log.txt", "w", encoding="utf-8")
+sys.stderr = sys.stdout
 class DualLogger:
     def __init__(self, filepath):
-        self.terminal = sys.__stdout__
+        self.terminal = sys.__stdout__   # 원래 콘솔
         self.log = open(filepath, "w", encoding="utf-8")
     def write(self, message):
         self.terminal.write(message)
@@ -35,496 +32,200 @@ class DualLogger:
 
 sys.stdout = sys.stderr = DualLogger("log.txt")
 
-# ===== Environment =====
+# ===== Environment / Settings (GitHub Actions & Local both) =====
 RUNNER = os.getenv("GITHUB_ACTIONS") == "true"
+
+# BigQuery
 PROJECT_ID = os.getenv("GCP_PROJECT") or "savvy-mantis-457008-k6"
 DATASET_ID = os.getenv("BQ_DATASET")  or "raw_data"
 TABLE_ID   = os.getenv("BQ_TABLE")    or "goods_csv"
+
+# Login (secrets override; local defaults stay as fallback)
 LOGIN_ID = os.getenv("LOGIN_ID") or "ppazic"
 LOGIN_PW = os.getenv("LOGIN_PW") or "123123"
 
+# Download folder
 if RUNNER:
-    downloads_folder = str((Path.cwd() / "downloads").resolve())
+downloads_folder = str((Path.cwd() / "downloads").resolve())
 else:
-    downloads_folder = r"C:\\Users\\white\\Downloads\\csv"
+downloads_folder = r"C:\\Users\\white\\Downloads\\csv"
 Path(downloads_folder).mkdir(parents=True, exist_ok=True)
 
+# GCP creds path (env first, else local file next to this script)
 GOOGLE_CREDS = os.getenv(
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    str((Path(__file__).parent / "bigquery-credentials.json").resolve()),
+"GOOGLE_APPLICATION_CREDENTIALS",
+str((Path(__file__).parent / "bigquery-credentials.json").resolve()),
 )
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_CREDS
 
+# URLs
 LOGIN_URL = "https://silkroad21.co.kr/pzadm/Login.asp"
 LIST_URL  = "https://silkroad21.co.kr/Admin/Acting/Acting_S.asp?gMnu1=101&gMnu2=10101"
 
-# ===== Helper =====
-def accept_alert_safe(driver, timeout=3):
-    appeared = False
-    end = time.time() + timeout
-    while time.time() < end:
-        try:
-            WebDriverWait(driver, 0.8).until(EC.alert_is_present())
-            alert = driver.switch_to.alert
-            print("[ALERT]", alert.text)
-            alert.accept()
-            appeared = True
-            time.sleep(0.2)
-        except Exception:
-            time.sleep(0.2)
-    return appeared
 
-def make_driver(headless=True):
-    options = webdriver.ChromeOptions()
-    if headless:
-        options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--remote-allow-origins=*")
-    options.add_argument("--window-size=1920,1080")
-    options.add_experimental_option("prefs", {
-        "download.default_directory": downloads_folder,
-        "download.prompt_for_download": False,
-        "download.directory_upgrade": True,
-        "safebrowsing.enabled": True,
-        "download.extensions_to_open": "",
-    })
+# ===== Helper functions =====
+def accept_alert_safe(driver, timeout: int = 3) -> bool:
+try:
+WebDriverWait(driver, timeout).until(EC.alert_is_present())
+alert = driver.switch_to.alert
+print("[ALERT]", alert.text)
+alert.accept()
+return True
+except Exception:
+return False
 
-    chrome_bin = os.getenv("CHROME_PATH")
-    if chrome_bin:
-        options.binary_location = chrome_bin
 
-    # 성능 로그(네트워크 이벤트) 활성화 (CDP 폴백용)
-    perf_prefs = {"enableNetwork": True, "enablePage": False}
-    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-    options.set_capability("goog:perfLoggingPrefs", perf_prefs)
+def make_driver(headless: bool = True) -> webdriver.Chrome:
+options = webdriver.ChromeOptions()
+if headless:
+options.add_argument("--headless=new")
+options.add_argument("--no-sandbox")
+options.add_argument("--disable-dev-shm-usage")  # linux shared mem fix
+options.add_argument("--disable-gpu")
+options.add_argument("--remote-allow-origins=*")
+options.add_experimental_option("prefs", {
+"download.default_directory": downloads_folder,
+"download.prompt_for_download": False,
+"download.directory_upgrade": True,
+"safebrowsing.enabled": True,
+"download.extensions_to_open": "",
+})
+# On GitHub runner, setup-chrome provides CHROME_PATH
+chrome_bin = os.getenv("CHROME_PATH")
+if chrome_bin:
+options.binary_location = chrome_bin
 
-    driver = webdriver.Chrome(options=options)
-    driver.set_page_load_timeout(300)
-    driver.set_script_timeout(300)
-    driver.implicitly_wait(5)
+driver = webdriver.Chrome(options=options)
+# Allow headless downloads (some envs require)
+try:
+driver.execute_cdp_cmd(
+"Page.setDownloadBehavior",
+{"behavior": "allow", "downloadPath": downloads_folder}
+)
+except Exception:
+pass
+driver.implicitly_wait(5)
+return driver
 
-    # (옵션) 내부 client_config timeout 확장(없어도 됨)
-    try:
-        driver.command_executor._client_config.timeout = 300
-    except Exception as e:
-        print("[WARN] client_config timeout 설정 실패:", e)
 
-    # Page/Browser 다운로드 허용
-    for cmd, params in [
-        ("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": downloads_folder}),
-        ("Browser.setDownloadBehavior", {"behavior": "allowAndName", "downloadPath": downloads_folder})
-    ]:
-        try:
-            driver.execute_cdp_cmd(cmd, params)
-        except Exception as e:
-            print(f"[WARN] {cmd} 실패:", e)
+def do_login(driver: webdriver.Chrome) -> None:
+driver.get(LOGIN_URL)
+wait = WebDriverWait(driver, 20)
+id_el = wait.until(EC.presence_of_element_located((By.NAME, "sMemId")))
+pw_el = wait.until(EC.presence_of_element_located((By.NAME, "sMemPw")))
 
-    # CDP Network enable
-    try:
-        driver.execute_cdp_cmd("Network.enable", {})
-        driver.execute_cdp_cmd("Network.setCacheDisabled", {"cacheDisabled": True})
-    except Exception as e:
-        print("[WARN] Network.enable 실패:", e)
+for el, val in ((id_el, LOGIN_ID), (pw_el, LOGIN_PW)):
+try:
+el.clear()
+except Exception:
+pass
+el.send_keys(val)
+pw_el.send_keys(Keys.RETURN)
 
-    return driver
+# Handle possible alert & retry once
+if accept_alert_safe(driver, timeout=3):
+id_el = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "sMemId")))
+pw_el = driver.find_element(By.NAME, "sMemPw")
+id_el.clear(); id_el.send_keys(LOGIN_ID)
+pw_el.clear(); pw_el.send_keys(LOGIN_PW); pw_el.send_keys(Keys.RETURN)
+accept_alert_safe(driver, timeout=2)
 
-def do_login(driver):
-    driver.get(LOGIN_URL)
-    wait = WebDriverWait(driver, 20)
-    id_el = wait.until(EC.presence_of_element_located((By.NAME, "sMemId")))
-    pw_el = wait.until(EC.presence_of_element_located((By.NAME, "sMemPw")))
-    for el, val in ((id_el, LOGIN_ID), (pw_el, LOGIN_PW)):
-        try: el.clear()
-        except: pass
-        el.send_keys(val)
-    pw_el.send_keys(Keys.RETURN)
-    accept_alert_safe(driver, 3)
-    try:
-        wait.until(lambda d: "Login.asp" not in d.current_url)
-    except TimeoutException:
-        raise RuntimeError("로그인 실패")
+# Consider login done when URL changes away from Login.asp
+try:
+wait.until(lambda d: "Login.asp" not in d.current_url)
+except TimeoutException:
+try:
+btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
+btn.click()
+WebDriverWait(driver, 10).until(lambda d: "Login.asp" not in d.current_url)
+except Exception:
+print("[LOGIN DEBUG] title =", driver.title)
+print("[LOGIN DEBUG] url   =", driver.current_url)
+raise RuntimeError("로그인에 실패했습니다. 계정/셀렉터 확인 필요")
 
-def goto_with_auth(driver, url, login_hint="Login.asp"):
-    driver.get(url)
-    if login_hint in driver.current_url:
-        print("[INFO] 세션 만료, 재로그인")
-        do_login(driver)
-        driver.get(url)
 
-def switch_to_new_window_if_any(driver, wait_sec=3):
-    base = driver.current_window_handle
-    start = time.time()
-    while time.time() - start < wait_sec:
-        handles = driver.window_handles
-        if len(handles) > 1:
-            for h in handles:
-                if h != base:
-                    driver.switch_to.window(h)
-                    print("[WINDOW] 새 창 전환]")
-                    return True
-        time.sleep(0.2)
-    return False
+def goto_with_auth(driver: webdriver.Chrome, url: str, login_hint: str = "Login.asp") -> None:
+driver.get(url)
+time.sleep(0.5)
+if login_hint in driver.current_url:
+print("[INFO] 세션 만료로 재로그인 시도")
+do_login(driver)
+driver.get(url)
 
-# --- 폼 제출로 다운로드 트리거 (frmSearch → Acting_X14.asp POST) ---
-def trigger_export_stably(driver, wait, max_attempts=2):
-    """
-    1순위: form#frmSearch (또는 name=frmSearch) action을 './Acting_X14.asp' 로 보정 후 submit()
-    2순위: 버튼 셀렉터/텍스트 클릭
-    3순위: JS 폴백 fnPageExl('X14')
-    """
-    # 1) 폼 직접 제출
-    try:
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "form#frmSearch, form[name='frmSearch']")))
-        js = r"""
-        (function(){
-            var f = document.getElementById('frmSearch') || document.forms['frmSearch'];
-            if(!f) throw new Error('frmSearch not found');
-            try { f.action = './Acting_X14.asp'; } catch(e) {}
-            try { f.method = 'post'; } catch(e) {}
-            if(!f.target || f.target === '') { f.target = '_self'; }
-            f.submit();
-            return (f.action || '') + '|' + (f.method || '') + '|' + (f.target || '');
-        })();
-        """
-        info = driver.execute_script(js)
-        print("[EXPORT] frmSearch.submit() 호출:", info)
-        time.sleep(0.5)
-        accept_alert_safe(driver, 1)
-        return
-    except Exception as e:
-        print("[WARN] 폼 직접 제출 실패, 버튼/JS 폴백 시도:", e)
 
-    # 2) (폴백) 버튼/텍스트 후보 클릭
-    priority_selectors = [
-        "#exportExcelBtn", "a#exportExcelBtn", "button#exportExcelBtn",
-    ]
-    generic_selectors = [
-        "button.excel, a.excel, input.excel",
-        "a[href*='Excel'], button[onclick*='Excel'], input[onclick*='Excel']",
-        "a[onclick*='fnPageExl'], button[onclick*='fnPageExl'], input[onclick*='fnPageExl']",
-        "a[download], button[download]",
-    ]
-    text_xpaths = [
-        "//a[normalize-space()[contains(., '엑셀') or contains(., 'Excel') or contains(., '다운로드')]]",
-        "//button[normalize-space()[contains(., '엑셀') or contains(., 'Excel') or contains(., '다운로드')]]",
-        "//input[@type='button' or @type='submit'][contains(@value,'엑셀') or contains(@value,'Excel') or contains(@value,'다운로드')]",
-    ]
+def wait_for_download_complete(dirpath: str, timeout: int = 180) -> None:
+end = time.time() + timeout
+pattern_cr = os.path.join(dirpath, "*.crdownload")
+pattern_csv = os.path.join(dirpath, "*.csv")
+while time.time() < end:
+if glob.glob(pattern_cr):
+time.sleep(0.8)
+continue
+if glob.glob(pattern_csv):
+return
+time.sleep(0.8)
+raise TimeoutError("다운로드 완료 대기 시간 초과")
 
-    def visible_and_enabled(el):
-        try:
-            return el.is_displayed() and el.is_enabled()
-        except Exception:
-            return False
-
-    def collect_candidates():
-        seen, candidates = set(), []
-        for sel in priority_selectors + generic_selectors:
-            try:
-                for el in driver.find_elements(By.CSS_SELECTOR, sel):
-                    if el.id in seen: continue
-                    if visible_and_enabled(el):
-                        candidates.append(("css", sel, el))
-                        seen.add(el.id)
-            except Exception:
-                pass
-        for xp in text_xpaths:
-            try:
-                for el in driver.find_elements(By.XPATH, xp):
-                    if el.id in seen: continue
-                    if visible_and_enabled(el):
-                        candidates.append(("xpath", xp, el))
-                        seen.add(el.id)
-            except Exception:
-                pass
-        return candidates
-
-    last_error = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            cands = collect_candidates()
-            def score(item):
-                kind, spec, el = item
-                onclick = (el.get_attribute("onclick") or "").lower()
-                id_attr = (el.get_attribute("id") or "").lower()
-                text = (el.text or "").strip()
-                s = 0
-                if id_attr == "exportexcelbtn": s += 100
-                if "fnpageexl" in onclick: s += 50
-                if any(k in text for k in ("엑셀", "excel", "다운로드")): s += 10
-                # TXT/텍스트 다운로드로 보이는 버튼은 패널티
-                if any(k in text.lower() for k in ("txt", "텍스트")): s -= 200
-                href = (el.get_attribute("href") or "").lower()
-                if "txt" in href: s -= 200
-                return -s
-            cands.sort(key=score)
-
-            for kind, spec, el in cands:
-                try:
-                    desc = f"{kind}:{spec}"
-                    print(f"[EXPORT] 버튼 클릭 시도({desc})")
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                    time.sleep(0.1)
-                    el.click()
-                    time.sleep(0.5)
-                    accept_alert_safe(driver, 1)
-                    try:
-                        html = driver.execute_script("return arguments[0].outerHTML;", el)
-                        print("[EXPORT] 선택 요소:", (html or "")[:300], "...")
-                    except Exception:
-                        pass
-                    return
-                except Exception as e:
-                    last_error = e
-                    continue
-        except Exception as e:
-            last_error = e
-            print(f"[WARN] 버튼 폴백 실패 시도 {attempt}:", e)
-            time.sleep(1.5)
-
-    # 3) 최후 폴백: 사이트 JS 직접 호출
-    print("[EXPORT] JS 폴백: fnPageExl('X14') 호출")
-    driver.execute_script("fnPageExl('X14');")
-    accept_alert_safe(driver, 1)
-    return
-
-# --- 상태 기반 다운로드 감시 (허용 확장자만) ---
-def wait_for_download_complete(folder: str, timeout: int = 300, allowed_exts: tuple = ALLOWED_EXTS):
-    start = time.time()
-    baseline = set(os.listdir(folder))
-    last_sizes = {}
-    def list_cr():
-        return [f for f in os.listdir(folder) if f.endswith(".crdownload")]
-    def fsize(p):
-        try: return os.path.getsize(p)
-        except FileNotFoundError: return -1
-
-    while True:
-        curr = set(os.listdir(folder))
-        new_entries = curr - baseline
-        completed = [f for f in new_entries if not f.endswith(".crdownload")]
-        if completed:
-            candidates = sorted(
-                (os.path.join(folder, f) for f in completed
-                 if os.path.splitext(f)[1].lower() in allowed_exts),
-                key=lambda p: os.path.getctime(p),
-                reverse=True,
-            )
-            if candidates:
-                return candidates[0]
-
-        crs = list_cr()
-        if crs:
-            progressed = False
-            for f in crs:
-                p = os.path.join(folder, f)
-                sz = fsize(p)
-                if p not in last_sizes or sz > last_sizes[p]:
-                    progressed = True
-                last_sizes[p] = sz
-            if not progressed and time.time() - start > timeout:
-                raise TimeoutError("DOWNLOAD_STALLED")
-        else:
-            complete_files = [f for f in os.listdir(folder)
-                              if (not f.endswith(".crdownload"))
-                              and (os.path.splitext(f)[1].lower() in allowed_exts)]
-            if complete_files:
-                recent = [os.path.join(folder, f) for f in complete_files
-                          if os.path.getctime(os.path.join(folder, f)) >= start]
-                if recent:
-                    return sorted(recent, key=os.path.getctime, reverse=True)[0]
-
-        if time.time() - start > timeout:
-            raise TimeoutError("NO_PROGRESS")
-        time.sleep(1.0)
-
-# --- ★ CDP 성능 로그로 '첨부파일 응답'을 잡아 저장 (TXT 차단) ---
-def cdp_capture_attachment_to_file(driver, out_dir, timeout=120,
-                                   allowed_mimes: set = ALLOWED_MIMES,
-                                   allowed_exts: tuple = ALLOWED_EXTS):
-    start = time.time()
-    os.makedirs(out_dir, exist_ok=True)
-
-    def iter_perf_logs():
-        try:
-            logs = driver.get_log("performance")
-        except Exception:
-            return []
-        events = []
-        for entry in logs:
-            try:
-                msg = json.loads(entry.get("message", "{}")).get("message", {})
-                events.append(msg)
-            except Exception:
-                continue
-        return events
-
-    target_req_id = None
-    filename = None
-    mime_hint = None
-
-    while time.time() - start < timeout:
-        for ev in iter_perf_logs():
-            if ev.get("method") == "Network.responseReceived":
-                params = ev.get("params", {})
-                res = params.get("response", {})
-                headers = {k.lower(): v for k, v in (res.get("headers", {}) or {}).items()}
-                cd = headers.get("content-disposition", "") or ""
-                ctype = (headers.get("content-type", "") or "").lower()
-
-                if "attachment" in cd.lower():
-                    fname = "download.bin"
-                    m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^\";]+)"?', cd, flags=re.I)
-                    if m: fname = m.group(1)
-
-                    ext = "." + fname.split(".")[-1].lower() if "." in fname else ""
-                    # TXT/일반 텍스트는 즉시 무시
-                    if ctype in REJECT_MIMES or ext in REJECT_EXTS:
-                        print(f"[CDP] 무시(TXT/PLAIN): filename={fname}, content-type={ctype}")
-                        continue
-
-                    # 허용 판단: 확장자 또는 MIME
-                    is_allowed = (ext in allowed_exts) or any(allowed in ctype for allowed in allowed_mimes)
-                    if not is_allowed:
-                        print(f"[CDP] 무시(비허용 타입): filename={fname}, content-type={ctype}")
-                        continue
-
-                    target_req_id = params.get("requestId")
-                    filename = fname
-                    mime_hint = ctype
-                    print(f"[CDP] attachment(허용) 감지: requestId={target_req_id}, filename={filename}, content-type={ctype}")
-                    break
-        if target_req_id:
-            break
-        time.sleep(0.3)
-
-    if not target_req_id:
-        raise TimeoutError("CDP: 첨부파일 응답을 찾지 못했습니다.")
-
-    body = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": target_req_id})
-    data = body.get("body", "")
-    encoded = body.get("base64Encoded", False)
-    content = base64.b64decode(data) if encoded else data.encode("utf-8", errors="ignore")
-
-    out_name = filename
-    if "." not in out_name and mime_hint:
-        if "csv" in mime_hint: out_name += ".csv"
-        elif "excel" in mime_hint or "spreadsheet" in mime_hint: out_name += ".xlsx"
-        elif "zip" in mime_hint: out_name += ".zip"
-
-    out_path = os.path.join(out_dir, out_name)
-    with open(out_path, "wb") as f:
-        f.write(content)
-    print(f"[CDP] 파일 저장 완료: {out_path}")
-    return out_path
 
 # ===== Main =====
 driver = make_driver(headless=True)
 try:
-    do_login(driver)
-    goto_with_auth(driver, LIST_URL)
-    wait = WebDriverWait(driver, 30)
-    for sel in ["#dataTable", ".list-table", "#divList", "table", ".grid"]:
-        try:
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
-            print(f"[READY] 리스트 로드 감지: {sel}")
-            break
-        except: continue
+do_login(driver)
+goto_with_auth(driver, LIST_URL)
 
-    # 1) 폼 제출(우선) → 실패 시 버튼/JS 폴백
-    trigger_export_stably(driver, WebDriverWait(driver, 20))
-    switch_to_new_window_if_any(driver, 3)
+# Trigger export JS
+driver.execute_script("fnPageExl('X14');")
+accept_alert_safe(driver, timeout=2)  # ignore info alerts
 
-    # 2) 상태 기반 다운로드 감시 (허용 확장자만)
-    latest_file = None
-    try:
-        latest_file = wait_for_download_complete(downloads_folder, 300, ALLOWED_EXTS)
-        print("⬇️ 다운로드 완료:", os.path.basename(latest_file))
-    except TimeoutError as te:
-        print("[INFO] 일반 다운로드 감시 실패:", te)
-        # 폴더 재검사 (허용 확장자만)
-        cand = []
-        for ext in ("*.csv", "*.xls", "*.xlsx", "*.zip"):
-            cand += glob.glob(os.path.join(downloads_folder, ext))
-        if cand:
-            latest_file = max(cand, key=os.path.getctime)
-            print("⬇️ 폴더 재검사로 파일 채택:", os.path.basename(latest_file))
-        else:
-            # CDP 폴백 (허용 타입만 수락)
-            latest_file = cdp_capture_attachment_to_file(
-                driver, downloads_folder, timeout=180,
-                allowed_mimes=ALLOWED_MIMES, allowed_exts=ALLOWED_EXTS
-            )
-
+# Wait for CSV
+wait_for_download_complete(downloads_folder, timeout=180)
 finally:
-    try: driver.quit()
-    except: pass
+driver.quit()
 
-# ===== File clean & upload =====
-cand_files = []
-for ext in ("*.csv", "*.xls", "*.xlsx", "*.zip"):
-    cand_files += glob.glob(os.path.join(downloads_folder, ext))
-if not cand_files:
-    print("❌ 파일이 존재하지 않습니다.")
-    sys.exit(1)
+# Keep newest file only
+csv_files = glob.glob(os.path.join(downloads_folder, "*.csv"))
+if not csv_files:
+print("❌ CSV 파일이 존재하지 않습니다. (다운로드 실패)")
+sys.exit(1)
+latest_file = max(csv_files, key=os.path.getctime)
+for fp in csv_files:
+if fp != latest_file:
+os.remove(fp)
+print("🗑 삭제됨:", os.path.basename(fp))
 
-latest_file = max(cand_files, key=os.path.getctime)
-for fp in list(cand_files):
-    if fp != latest_file:
-        try:
-            os.remove(fp)
-            print("🗑 삭제됨:", os.path.basename(fp))
-        except Exception:
-            pass
-
-df = None
-load_err = None
-if latest_file.lower().endswith(".csv"):
-    try:
-        df = pd.read_csv(latest_file, encoding="utf-8-sig", dtype=str, on_bad_lines="skip")
-    except Exception as e1:
-        try:
-            df = pd.read_csv(latest_file, encoding="cp949", dtype=str, on_bad_lines="skip")
-        except Exception as e2:
-            load_err = (e1, e2)
-elif latest_file.lower().endswith((".xls", ".xlsx")):
-    try:
-        df = pd.read_excel(latest_file, dtype=str)
-    except Exception as e:
-        load_err = e
-else:
-    load_err = f"지원하지 않는 확장자: {latest_file}"
-
-if df is None:
-    print("❌ 데이터 로딩 실패:", load_err)
-    sys.exit(1)
-
+# Load & clean
+try:
+df = pd.read_csv(latest_file, encoding="utf-8-sig", dtype=str, on_bad_lines="skip")
+except Exception:
+df = pd.read_csv(latest_file, encoding="cp949", dtype=str, on_bad_lines="skip")
 print(f"📊 데이터 로딩 완료: {len(df)} rows")
 
 def sanitize_columns(cols):
-    seen, out = {}, []
-    for c in cols:
-        c = (c or "").strip()
-        c = re.sub(r"[^\w]", "_", c)
-        if re.match(r"^\d", c): c = "_" + c
-        base = c; i = 1
-        while c in seen:
-            c = f"{base}_{i}"; i += 1
-        seen[c] = True; out.append(c)
-    return out
+seen = {}
+out = []
+for c in cols:
+c = (c or "").strip()
+c = re.sub(r"[^\w]", "_", c)
+if re.match(r"^\d", c):
+c = "_" + c
+base = c; i = 1
+while c in seen:
+c = f"{base}_{i}"; i += 1
+seen[c] = True; out.append(c)
+return out
 
 df.columns = sanitize_columns(df.columns)
 df = df.dropna(how="all").drop_duplicates()
 print("🧹 데이터 정제 완료")
 
+# Upload to BigQuery
 client = bigquery.Client(project=PROJECT_ID)
 full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 job = client.load_table_from_dataframe(
-    df,
-    full_table_id,
-    location="asia-northeast3",
-    job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE"),
+df,
+full_table_id,
+location="asia-northeast3",
+job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE"),
 )
 job.result()
 print(f"✅ BigQuery 업로드 성공: {len(df)}건 → {full_table_id}")

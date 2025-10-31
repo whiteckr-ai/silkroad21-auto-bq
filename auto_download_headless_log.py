@@ -161,7 +161,7 @@ def goto_with_auth(driver: webdriver.Chrome, url: str, login_hint: str = "Login.
         driver.get(url)
 
 
-def wait_for_download_complete(dirpath: str, timeout: int = 180) -> None:
+def wait_for_download_complete(dirpath: str, timeout: int = 1000) -> None:
     end = time.time() + timeout
     pattern_cr = os.path.join(dirpath, "*.crdownload")
     pattern_csv = os.path.join(dirpath, "*.csv")
@@ -187,7 +187,7 @@ try:
     accept_alert_safe(driver, timeout=2)
 
     # CSV 생성 대기
-    wait_for_download_complete(downloads_folder, timeout=180)
+    wait_for_download_complete(downloads_folder, timeout=1000)
 
 finally:
     try:

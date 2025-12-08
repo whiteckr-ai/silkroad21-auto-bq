@@ -36,6 +36,12 @@ jobs:
         run: |
           echo "$SERVICE_ACCOUNT_JSON_B64" | base64 -d > bigquery-credentials.json
 
+      - name: Debug connectivity to silkroad21
+        run: |
+          echo "Testing curl to silkroad21 /pzadm/Login.asp ..."
+          curl -v https://silkroad21.co.kr/pzadm/Login.asp || echo "curl failed"
+
+
       - name: Run script
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/bigquery-credentials.json

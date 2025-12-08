@@ -185,11 +185,32 @@ try:
     do_login(driver)
     goto_with_auth(driver, LIST_URL)
 
-    # 사이트의 내보내기 JS 직접 호출 (X14: CSV)
-    driver.execute_script("fnPageExl('X14');")
-    accept_alert_safe(driver, timeout=2)
+    # ===== 엑셀 다운로드 버튼 클릭 방식으로 변경 =====
+    try:
+        print("[INFO] 엑셀 다운로드 버튼 찾는 중...")
+        wait = WebDriverWait(driver, 20)
 
-    # CSV 생성 대기
+        # onclick 또는 href 안에 fnPageExl('X14') 가 들어간 a 태그를 찾는다
+        export_btn = wait.until(
+            EC.element_to_be_clickable(
+                (
+                    By.CSS_SELECTOR,
+                    "a[onclick*=\"fnPageExl('X14')\"], a[href*=\"fnPageExl('X14')\"]",
+                )
+            )
+        )
+        print("[INFO] 엑셀 다운로드 버튼 클릭")
+        export_btn.click()
+    except Exception as e:
+        print("[WARN] 버튼 클릭 방식 실패, execute_script로 대체 시도:", e)
+        # fallback: 그래도 안 되면 짧은 타임아웃으로 한번만 JS 직접 호출
+        driver.set_script_timeout(10)
+        driver.execute_script("fnPageExl('X14');")
+
+    # 다운로드 과정에서 alert 뜨면 처리
+    accept_alert_safe(driver, timeout=5)
+
+    # CSV 생성/다운로드 완료 대기
     wait_for_download_complete(downloads_folder, timeout=1000)
 
 finally:

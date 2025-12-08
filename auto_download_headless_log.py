@@ -178,6 +178,9 @@ def wait_for_download_complete(dirpath: str, timeout: int = 1000) -> None:
 
 # ===== Main =====
 driver = make_driver(headless=True)
+driver.command_executor.set_timeout(600)   # ChromeDriver와의 통신 타임아웃 (10분)
+driver.set_script_timeout(600)             # JS 실행 시간 제한
+driver.set_page_load_timeout(600)          # 페이지 로딩 시간 제한
 try:
     do_login(driver)
     goto_with_auth(driver, LIST_URL)

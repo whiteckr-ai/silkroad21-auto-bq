@@ -276,3 +276,45 @@ job = client.load_table_from_dataframe(
 )
 job.result()
 print(f"✅ BigQuery 업로드 성공: {len(df)}건 → {full_table_id}")
+
+# =====================================================================
+# 🚀 [추가] KDocs DBSheet 듀얼 전송 파이프라인
+# =====================================================================
+import requests
+import json
+
+print("🚀 KDocs DBSheet로 데이터 전송 시작...")
+
+# GitHub Secrets에서 KDocs 웹훅 URL을 가져옵니다.
+KDOCS_WEBHOOK_URL = os.getenv("KDOCS_WEBHOOK_URL")
+
+if not KDOCS_WEBHOOK_URL:
+    print("⚠️ KDOCS_WEBHOOK_URL이 설정되지 않아 KDocs 전송을 건너뜁니다.")
+else:
+    # 1. 데이터 전처리 (판다스의 NaN 값을 빈 문자열로 치환해야 JSON 에러가 안 납니다)
+    df_kdocs = df.fillna("")
+    
+    # 2. DataFrame을 2차원 배열(List of Lists) 형태로 변환
+    rows_data = df_kdocs.values.tolist()
+    
+    # 3. KDocs API 규격에 맞게 페이로드 구성
+    payload = {
+        "rows": rows_data
+    }
+
+    # 4. KDocs 웹훅으로 POST 요청 발송
+    try:
+        response = requests.post(
+            KDOCS_WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"}
+        )
+        print(f"📡 KDocs 응답 코드: {response.status_code}")
+        print(f"📩 KDocs 응답 내용: {response.text}")
+        
+        if response.status_code == 200:
+            print("✅ KDocs DBSheet 업데이트 성공!")
+        else:
+            print("❌ KDocs DBSheet 업데이트 실패!")
+    except Exception as e:
+        print(f"❌ KDocs 전송 중 통신 에러 발생: {e}")

@@ -2,3 +2,4 @@ selenium
 pandas
 pyarrow
 google-cloud-bigquery
+requests

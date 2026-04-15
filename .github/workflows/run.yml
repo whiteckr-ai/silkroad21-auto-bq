@@ -50,6 +50,7 @@ jobs:
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
           BQ_DATASET: ${{ secrets.BQ_DATASET }}   # ← 점 표기
           BQ_TABLE: ${{ secrets.BQ_TABLE }}       # ← 점 표기
+          KDOCS_WEBHOOK_URL: ${{ secrets.KDOCS_WEBHOOK_URL }} # 👈 이 줄을 추가합니다.
         run: python auto_download_headless_log.py
 
       - name: Upload logs/artifacts

@@ -285,36 +285,44 @@ import json
 
 print("🚀 KDocs DBSheet로 데이터 전송 시작...")
 
-# GitHub Secrets에서 KDocs 웹훅 URL을 가져옵니다.
-KDOCS_WEBHOOK_URL = os.getenv("KDOCS_WEBHOOK_URL")
+# 1. URL과 토큰을 직접 문자열로 기재합니다.
+KDOCS_WEBHOOK_URL = "https://www.kdocs.cn/api/v3/ide/file/cnIgZYoMts1i/script/V2-5vnUpdVQGXoWN9loeiAx39/sync_task"
 
-if not KDOCS_WEBHOOK_URL:
-    print("⚠️ KDOCS_WEBHOOK_URL이 설정되지 않아 KDocs 전송을 건너뜁니다.")
-else:
-    # 1. 데이터 전처리 (판다스의 NaN 값을 빈 문자열로 치환해야 JSON 에러가 안 납니다)
-    df_kdocs = df.fillna("")
-    
-    # 2. DataFrame을 2차원 배열(List of Lists) 형태로 변환
-    rows_data = df_kdocs.values.tolist()
-    
-    # 3. KDocs API 규격에 맞게 페이로드 구성
-    payload = {
-        "rows": rows_data
-    }
+# 💡 [수정 필수] KDocs 웹훅 복사 시 나왔던 AirScript-Token 값을 아래에 입력하세요.
+AIRSCRIPT_TOKEN = "1Vg353OyhzW3n27xfSZKUh"
 
-    # 4. KDocs 웹훅으로 POST 요청 발송
+# 2. 헤더에 토큰 인증 정보 추가
+headers = {
+    "Content-Type": "application/json",
+    "AirScript-Token": AIRSCRIPT_TOKEN
+}
+
+# 3. 데이터 전처리 (판다스의 NaN 값을 빈 문자열로 치환)
+df_kdocs = df.fillna("")
+all_data = df_kdocs.values.tolist()
+
+# 4. KDocs 서버 과부하 및 403 차단 방지를 위해 100건씩 분할 전송
+chunk_size = 100
+total_chunks = (len(all_data) // chunk_size) + 1
+
+for i in range(0, len(all_data), chunk_size):
+    chunk = all_data[i : i + chunk_size]
+    payload = {"rows": chunk}
+
     try:
         response = requests.post(
             KDOCS_WEBHOOK_URL,
             json=payload,
-            headers={"Content-Type": "application/json"}
+            headers=headers,
+            timeout=30
         )
-        print(f"📡 KDocs 응답 코드: {response.status_code}")
-        print(f"📩 KDocs 응답 내용: {response.text}")
+        current_chunk = (i // chunk_size) + 1
+        print(f"📡 [{current_chunk}/{total_chunks}회차] 응답 코드: {response.status_code}")
         
-        if response.status_code == 200:
-            print("✅ KDocs DBSheet 업데이트 성공!")
-        else:
-            print("❌ KDocs DBSheet 업데이트 실패!")
+        if response.status_code != 200:
+            print(f"❌ 에러 내용: {response.text}")
+            
     except Exception as e:
-        print(f"❌ KDocs 전송 중 통신 에러 발생: {e}")
+        print(f"❌ 전송 중 통신 에러 발생: {e}")
+
+print("✅ KDocs DBSheet 릴레이 전송 프로세스 종료")

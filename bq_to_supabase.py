@@ -6,7 +6,7 @@ from google.cloud import bigquery
 
 print("🚀 BigQuery -> Supabase 동기화 프로세스 시작...")
 
-# 1. 환경 변수 세팅 (💡 삭제되었던 기본값 복구 완료)
+# 1. 환경 변수 세팅
 PROJECT_ID = os.getenv("GCP_PROJECT") or "savvy-mantis-457008-k6"
 DATASET_ID = os.getenv("BQ_DATASET") or "raw_data"
 TABLE_ID = os.getenv("BQ_TABLE") or "goods_csv"
@@ -26,9 +26,20 @@ try:
     query = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`"
     df = client.query(query).to_dataframe()
     
-    # JSON 통신을 위해 데이터를 깔끔한 문자열로 변환하고 빈 값(NaN) 처리
-    df = df.fillna("").astype(str)
+    # 💡 [핵심] Pandas 결측치를 DB용 완벽한 None으로 1차 변환
+    df = df.astype(object).where(pd.notnull(df), None)
     records = df.to_dict(orient="records")
+    
+    # 💡 [핵심] 스페이스바 공백(" "), "nan" 문자열 등 모든 형태의 찌꺼기를 None으로 2차 확인 사살
+    for row in records:
+        for key, value in row.items():
+            if isinstance(value, str):
+                cleaned_val = value.strip()
+                if cleaned_val in ["", "nan", "None", "<NA>", "NaT"]:
+                    row[key] = None
+                else:
+                    row[key] = cleaned_val
+
     print(f"✅ BigQuery 데이터 로드 완료: 총 {len(records)}건")
 except Exception as e:
     print(f"❌ BigQuery 읽기 실패: {e}")
@@ -48,10 +59,7 @@ auth_headers = {
 # 4. 기존 Supabase 데이터 싹 지우기
 print("🗑️ 기존 Supabase 데이터 삭제 중...")
 try:
-    # 💡 주의: 엑셀 파일의 첫 번째 기둥(컬럼) 이름이 '신청서번호'라면 아래 주소를 수정하세요!
-    # 예: delete_url = f"{API_URL}?신청서번호=not.is.null"
     delete_url = f"{API_URL}?id=not.is.null" 
-    
     requests.delete(delete_url, headers=auth_headers, timeout=60)
     print("✅ 기존 데이터 삭제 완료!")
 except Exception as e:

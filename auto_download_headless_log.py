@@ -282,7 +282,7 @@ else:
     try:
         # Supabase API는 실수 방지를 위해 조건 없는 전체 삭제를 막아둡니다.
         # 따라서 'id 값이 비어있지 않은 모든 줄을 지워라' 라는 조건을 주어 전체 삭제를 유도합니다.
-        delete_url = f"{API_URL}?id=not.is.null"
+        delete_url = f"{API_URL}?신청서번호=not.is.null"
         requests.delete(delete_url, headers=auth_headers, timeout=60)
         print("✅ 기존 데이터 삭제 완료!")
     except Exception as e:

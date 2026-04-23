@@ -26,11 +26,10 @@ try:
     query = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`"
     df = client.query(query).to_dataframe()
     
-    # 💡 [핵심] 보이지 않는 띄어쓰기 찌꺼기 먼저 청소 후 완벽하게 중복 제거
+    # 중복 데이터 완벽 제거
     if '아이템번호' in df.columns:
         df['아이템번호'] = df['아이템번호'].astype(str).str.strip()
         df = df.drop_duplicates(subset=['아이템번호'], keep='last')
-        print(f"🧹 중복 데이터 제거 완료. 남은 데이터: 총 {len(df)}건")
 
     # DB용 빈칸(None) 처리
     df = df.astype(object).where(pd.notnull(df), None)
@@ -51,23 +50,33 @@ except Exception as e:
     sys.exit(1)
 
 if not records:
-    print("⚠️ BigQuery에 전송할 데이터가 없습니다.")
+    print("⚠️ 전송할 데이터가 없습니다.")
     sys.exit(0)
 
-# 3. Supabase 전송 세팅
+# 3. Supabase API 세팅
 API_URL = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
 auth_headers = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}"
 }
 
-# 💡 거짓말하던 삭제(Delete) 로직은 아예 빼버렸습니다! 
-# (아래의 Upsert 기능이 알아서 다 덮어쓰기 때문입니다)
+# 4. 🧹 [핵심] 완벽한 기존 데이터 삭제 (아이템번호 기준)
+print("🗑️ 기존 Supabase 데이터 진짜 삭제 중...")
+try:
+    # 아이템번호가 존재하는 모든 줄을 삭제 = 전체 삭제
+    delete_url = f"{API_URL}?아이템번호=not.is.null" 
+    requests.delete(delete_url, headers=auth_headers, timeout=60)
+    print("✅ 기존 데이터 삭제 완료!")
+except Exception as e:
+    print(f"❌ 데이터 삭제 통신 에러: {e}")
 
-# 4. 🚀 [가장 중요] 무조건 덮어쓰기(Upsert) 마법 활성화
+# 5. 🚀 [핵심] 완벽한 덮어쓰기(Upsert) 설정
 insert_headers = auth_headers.copy()
 insert_headers["Content-Type"] = "application/json"
 insert_headers["Prefer"] = "return=minimal, resolution=merge-duplicates"
+
+# 💡 명시적으로 "아이템번호가 겹치면 무조건 덮어써라" 라고 API에 타겟 지정
+upsert_url = f"{API_URL}?on_conflict=아이템번호"
 
 chunk_size = 3000
 total_chunks = (len(records) // chunk_size) + 1
@@ -75,7 +84,7 @@ total_chunks = (len(records) // chunk_size) + 1
 for i in range(0, len(records), chunk_size):
     chunk = records[i : i + chunk_size]
     try:
-        response = requests.post(API_URL, headers=insert_headers, json=chunk, timeout=60)
+        response = requests.post(upsert_url, headers=insert_headers, json=chunk, timeout=60)
         current_chunk = (i // chunk_size) + 1
         
         if response.status_code in [200, 201, 204]:

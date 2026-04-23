@@ -16,7 +16,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_TABLE = os.getenv("SUPABASE_TABLE")
 
 if not all([PROJECT_ID, DATASET_ID, TABLE_ID, SUPABASE_URL, SUPABASE_KEY, SUPABASE_TABLE]):
-    print("❌ 에러: 필수 환경 변수가 누락되었습니다. (URL 또는 KEY 확인 필요)")
+    print("❌ 에러: 필수 환경 변수가 누락되었습니다.")
     sys.exit(1)
 
 # 2. BigQuery에서 데이터 가져오기
@@ -26,16 +26,16 @@ try:
     query = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`"
     df = client.query(query).to_dataframe()
     
-    # 💡 [핵심] BigQuery 데이터 안의 중복 '아이템번호' 제거 (최신 데이터 1개만 유지)
+    # 💡 [핵심] 보이지 않는 띄어쓰기 찌꺼기 먼저 청소 후 완벽하게 중복 제거
     if '아이템번호' in df.columns:
+        df['아이템번호'] = df['아이템번호'].astype(str).str.strip()
         df = df.drop_duplicates(subset=['아이템번호'], keep='last')
         print(f"🧹 중복 데이터 제거 완료. 남은 데이터: 총 {len(df)}건")
 
-    # Pandas 결측치를 DB용 완벽한 None으로 1차 변환
+    # DB용 빈칸(None) 처리
     df = df.astype(object).where(pd.notnull(df), None)
     records = df.to_dict(orient="records")
     
-    # 스페이스바 공백(" "), "nan" 문자열 등 모든 형태의 찌꺼기를 None으로 2차 확인 사살
     for row in records:
         for key, value in row.items():
             if isinstance(value, str):
@@ -61,19 +61,13 @@ auth_headers = {
     "Authorization": f"Bearer {SUPABASE_KEY}"
 }
 
-# 4. 기존 Supabase 데이터 싹 지우기
-print("🗑️ 기존 Supabase 데이터 삭제 중...")
-try:
-    delete_url = f"{API_URL}?id=not.is.null" 
-    requests.delete(delete_url, headers=auth_headers, timeout=60)
-    print("✅ 기존 데이터 삭제 완료!")
-except Exception as e:
-    print(f"❌ 데이터 삭제 통신 에러: {e}")
+# 💡 거짓말하던 삭제(Delete) 로직은 아예 빼버렸습니다! 
+# (아래의 Upsert 기능이 알아서 다 덮어쓰기 때문입니다)
 
-# 5. Supabase로 새 데이터 밀어넣기
+# 4. 🚀 [가장 중요] 무조건 덮어쓰기(Upsert) 마법 활성화
 insert_headers = auth_headers.copy()
 insert_headers["Content-Type"] = "application/json"
-insert_headers["Prefer"] = "return=minimal"
+insert_headers["Prefer"] = "return=minimal, resolution=merge-duplicates"
 
 chunk_size = 3000
 total_chunks = (len(records) // chunk_size) + 1
@@ -85,7 +79,7 @@ for i in range(0, len(records), chunk_size):
         current_chunk = (i // chunk_size) + 1
         
         if response.status_code in [200, 201, 204]:
-            print(f"📡 [{current_chunk}/{total_chunks}회차] 전송 성공")
+            print(f"📡 [{current_chunk}/{total_chunks}회차] 덮어쓰기 전송 성공")
         else:
             print(f"❌ [{current_chunk}/{total_chunks}회차] 실패: {response.text}")
             

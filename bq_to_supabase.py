@@ -68,7 +68,7 @@ except Exception as e:
 # 5. Supabase로 새 데이터 밀어넣기
 insert_headers = auth_headers.copy()
 insert_headers["Content-Type"] = "application/json"
-insert_headers["Prefer"] = "return=minimal, resolution=merge-duplicates"
+insert_headers["Prefer"] = "return=minimal"
 
 chunk_size = 3000
 total_chunks = (len(records) // chunk_size) + 1

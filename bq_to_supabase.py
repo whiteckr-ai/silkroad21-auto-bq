@@ -6,17 +6,17 @@ from google.cloud import bigquery
 
 print("🚀 BigQuery -> Supabase 동기화 프로세스 시작...")
 
-# 1. 환경 변수 세팅
-PROJECT_ID = os.getenv("GCP_PROJECT")
-DATASET_ID = os.getenv("BQ_DATASET")
-TABLE_ID = os.getenv("BQ_TABLE")
+# 1. 환경 변수 세팅 (💡 삭제되었던 기본값 복구 완료)
+PROJECT_ID = os.getenv("GCP_PROJECT") or "savvy-mantis-457008-k6"
+DATASET_ID = os.getenv("BQ_DATASET") or "raw_data"
+TABLE_ID = os.getenv("BQ_TABLE") or "goods_csv"
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_TABLE = os.getenv("SUPABASE_TABLE")
 
 if not all([PROJECT_ID, DATASET_ID, TABLE_ID, SUPABASE_URL, SUPABASE_KEY, SUPABASE_TABLE]):
-    print("❌ 에러: 필수 환경 변수가 누락되었습니다. 깃허브 시크릿을 확인해주세요.")
+    print("❌ 에러: 필수 환경 변수가 누락되었습니다. (URL 또는 KEY 확인 필요)")
     sys.exit(1)
 
 # 2. BigQuery에서 데이터 가져오기

@@ -15,6 +15,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from google.cloud import bigquery
+import requests
+import json
 
 # ===== Stdout to log.txt =====
 class DualLogger:
@@ -256,11 +258,8 @@ job.result()
 print(f"✅ BigQuery 업로드 성공: {len(df)}건 → {full_table_id}")
 
 # =====================================================================
-# 🚀 [변경] Supabase 전송 파이프라인
+# 🚀 [완결판] Supabase 전송 파이프라인 (무조건 덮어쓰기 + 빈칸 청소)
 # =====================================================================
-import requests
-import json
-
 print("🚀 Supabase로 데이터 전송 시작...")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -270,32 +269,38 @@ SUPABASE_TABLE = os.getenv("SUPABASE_TABLE")
 if not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_TABLE:
     print("❌ Supabase 환경변수가 설정되지 않아 전송을 중지합니다.")
 else:
+    # 💡 1. 중복 데이터 완벽 제거 ('아이템번호' 기준 최신화)
+    if '아이템번호' in df.columns:
+        df['아이템번호'] = df['아이템번호'].astype(str).str.strip()
+        df = df.drop_duplicates(subset=['아이템번호'], keep='last')
+        print(f"🧹 Supabase용 중복 제거 완료. 남은 데이터: {len(df)}건")
+
+    # 💡 2. DB 에러 주범인 빈칸(None) 완벽 청소
+    df = df.astype(object).where(pd.notnull(df), None)
+    records = df.to_dict(orient="records")
+
+    for row in records:
+        for key, value in row.items():
+            if isinstance(value, str):
+                cleaned_val = value.strip()
+                if cleaned_val in ["", "nan", "None", "<NA>", "NaT"]:
+                    row[key] = None
+                else:
+                    row[key] = cleaned_val
+
+    # 💡 3. Supabase 통신 세팅
     API_URL = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
-    
     auth_headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}"
     }
 
-    # 👇 [추가된 부분: 기존 데이터 싹 지우기] 👇
-    print("🗑️ 기존 Supabase 데이터 삭제 중...")
-    try:
-        # Supabase API는 실수 방지를 위해 조건 없는 전체 삭제를 막아둡니다.
-        # 따라서 'id 값이 비어있지 않은 모든 줄을 지워라' 라는 조건을 주어 전체 삭제를 유도합니다.
-        delete_url = f"{API_URL}?신청서번호=not.is.null"
-        requests.delete(delete_url, headers=auth_headers, timeout=60)
-        print("✅ 기존 데이터 삭제 완료!")
-    except Exception as e:
-        print(f"❌ 데이터 삭제 통신 에러: {e}")
-    # 👆 ------------------------------------- 👆
-
-    # 데이터 입력용 헤더 설정
     insert_headers = auth_headers.copy()
     insert_headers["Content-Type"] = "application/json"
-    insert_headers["Prefer"] = "return=minimal"
+    insert_headers["Prefer"] = "return=minimal, resolution=merge-duplicates"
 
-    # NaN 값은 에러를 유발하므로 빈 문자열로 처리
-    records = df.fillna("").to_dict(orient="records")
+    # 아이템번호 충돌 시 덮어쓰기 타겟 명시
+    upsert_url = f"{API_URL}?on_conflict=아이템번호"
 
     chunk_size = 3000
     total_chunks = (len(records) // chunk_size) + 1
@@ -303,15 +308,15 @@ else:
     for i in range(0, len(records), chunk_size):
         chunk = records[i : i + chunk_size]
         try:
-            response = requests.post(API_URL, headers=insert_headers, json=chunk, timeout=60)
+            response = requests.post(upsert_url, headers=insert_headers, json=chunk, timeout=60)
             current_chunk = (i // chunk_size) + 1
             
             if response.status_code in [200, 201, 204]:
-                print(f"📡 [{current_chunk}/{total_chunks}회차] 전송 성공")
+                print(f"📡 [{current_chunk}/{total_chunks}회차] 덮어쓰기 전송 성공")
             else:
                 print(f"❌ [{current_chunk}/{total_chunks}회차] 실패: {response.text}")
                 
         except Exception as e:
             print(f"❌ 전송 중 통신 에러 발생: {e}")
 
-    print("✅ Supabase 싹 지우고 덮어쓰기 완료!")
+    print("🎉 크롤링 -> BigQuery -> Supabase 모든 자동화 파이프라인 완료!")

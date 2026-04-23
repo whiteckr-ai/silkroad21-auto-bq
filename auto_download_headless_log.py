@@ -272,28 +272,41 @@ if not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_TABLE:
 else:
     API_URL = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
     
-    headers = {
+    auth_headers = {
         "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal" # 응답 데이터 최소화로 속도 향상
+        "Authorization": f"Bearer {SUPABASE_KEY}"
     }
 
-    # KDocs 방식이 아닌, Supabase가 요구하는 정석 JSON(Dict) 포맷으로 변환
+    # 👇 [추가된 부분: 기존 데이터 싹 지우기] 👇
+    print("🗑️ 기존 Supabase 데이터 삭제 중...")
+    try:
+        # Supabase API는 실수 방지를 위해 조건 없는 전체 삭제를 막아둡니다.
+        # 따라서 'id 값이 비어있지 않은 모든 줄을 지워라' 라는 조건을 주어 전체 삭제를 유도합니다.
+        delete_url = f"{API_URL}?id=not.is.null"
+        requests.delete(delete_url, headers=auth_headers, timeout=60)
+        print("✅ 기존 데이터 삭제 완료!")
+    except Exception as e:
+        print(f"❌ 데이터 삭제 통신 에러: {e}")
+    # 👆 ------------------------------------- 👆
+
+    # 데이터 입력용 헤더 설정
+    insert_headers = auth_headers.copy()
+    insert_headers["Content-Type"] = "application/json"
+    insert_headers["Prefer"] = "return=minimal"
+
     # NaN 값은 에러를 유발하므로 빈 문자열로 처리
     records = df.fillna("").to_dict(orient="records")
 
-    # Supabase의 안정적인 처리를 위해 3,000건씩 쪼개서 발송
     chunk_size = 3000
     total_chunks = (len(records) // chunk_size) + 1
 
     for i in range(0, len(records), chunk_size):
         chunk = records[i : i + chunk_size]
         try:
-            response = requests.post(API_URL, headers=headers, json=chunk, timeout=60)
+            response = requests.post(API_URL, headers=insert_headers, json=chunk, timeout=60)
             current_chunk = (i // chunk_size) + 1
             
-            if response.status_code in [200, 201]:
+            if response.status_code in [200, 201, 204]:
                 print(f"📡 [{current_chunk}/{total_chunks}회차] 전송 성공")
             else:
                 print(f"❌ [{current_chunk}/{total_chunks}회차] 실패: {response.text}")
@@ -301,4 +314,4 @@ else:
         except Exception as e:
             print(f"❌ 전송 중 통신 에러 발생: {e}")
 
-    print("✅ Supabase 전송 릴레이 프로세스 종료")
+    print("✅ Supabase 싹 지우고 덮어쓰기 완료!")

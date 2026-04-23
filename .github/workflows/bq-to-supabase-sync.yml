@@ -1,0 +1,46 @@
+name: bq-to-supabase-sync
+
+on:
+  schedule:
+    - cron: "55 * * * *"   # UTC 기준 매시 55분
+  workflow_dispatch:
+
+concurrency:
+  group: bq-to-supabase-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # 크롤링이 없으므로 시간 단축
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 필요한 패키지만 설치
+          pip install pandas google-cloud-bigquery requests pyarrow db-dtypes
+
+      - name: Restore GCP creds file
+        env:
+          SERVICE_ACCOUNT_JSON_B64: ${{ secrets.SERVICE_ACCOUNT_JSON_B64 }}
+        run: |
+          echo "$SERVICE_ACCOUNT_JSON_B64" | base64 -d > bigquery-credentials.json
+
+      - name: Run Sync Script
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/bigquery-credentials.json
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          BQ_DATASET: ${{ secrets.BQ_DATASET }}
+          BQ_TABLE: ${{ secrets.BQ_TABLE }}
+          SUPABASE_URL: "https://sgxharnotdcbcgixzuvc.supabase.co"
+          SUPABASE_KEY: "sb_publishable_9TejPrZsFYsa2PBgj0KPaA_-S5ehtOH"
+          SUPABASE_TABLE: "orders" # 💡 생성하신 테이블 이름 확인!
+        run: python bq_to_supabase.py

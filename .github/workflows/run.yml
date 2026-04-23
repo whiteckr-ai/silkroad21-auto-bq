@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: auto-download-bq-${{ github.ref }}
-  cancel-in-progress: false  # 새 실행이 와도 이전 실행을 취소하지 않음(원하면 true)
+  cancel-in-progress: false
 
 jobs:
   run:
@@ -41,16 +41,18 @@ jobs:
           echo "Testing curl to silkroad21 /pzadm/Login.asp ..."
           curl -v https://silkroad21.co.kr/pzadm/Login.asp || echo "curl failed"
 
-
       - name: Run script
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/bigquery-credentials.json
           LOGIN_ID: ${{ secrets.LOGIN_ID }}
           LOGIN_PW: ${{ secrets.LOGIN_PW }}
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
-          BQ_DATASET: ${{ secrets.BQ_DATASET }}   # ← 점 표기
-          BQ_TABLE: ${{ secrets.BQ_TABLE }}       # ← 점 표기
-          KDOCS_WEBHOOK_URL: ${{ secrets.KDOCS_WEBHOOK_URL }} # 👈 이 줄을 추가합니다.
+          BQ_DATASET: ${{ secrets.BQ_DATASET }}
+          BQ_TABLE: ${{ secrets.BQ_TABLE }}
+          # 👇 Supabase 연동 정보 추가 👇
+          SUPABASE_URL: "https://sgxharnotdcbcgixzuvc.supabase.co"
+          SUPABASE_KEY: "sb_publishable_9TejPrZsFYsa2PBgj0KPaA_-S5ehtOH"
+          SUPABASE_TABLE: "orders" # 💡 Supabase에 만드신 테이블 이름으로 꼭 수정하세요!
         run: python auto_download_headless_log.py
 
       - name: Upload logs/artifacts

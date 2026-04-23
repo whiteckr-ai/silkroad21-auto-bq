@@ -26,11 +26,16 @@ try:
     query = f"SELECT * FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`"
     df = client.query(query).to_dataframe()
     
-    # 💡 [핵심] Pandas 결측치를 DB용 완벽한 None으로 1차 변환
+    # 💡 [핵심 추가] BigQuery 데이터 안의 중복 '아이템번호' 제거 (최신 데이터 1개만 유지)
+    if '아이템번호' in df.columns:
+        df = df.drop_duplicates(subset=['아이템번호'], keep='last')
+        print(f"🧹 중복 데이터 제거 완료. 남은 데이터: 총 {len(df)}건")
+
+    # Pandas 결측치를 DB용 완벽한 None으로 1차 변환
     df = df.astype(object).where(pd.notnull(df), None)
     records = df.to_dict(orient="records")
     
-    # 💡 [핵심] 스페이스바 공백(" "), "nan" 문자열 등 모든 형태의 찌꺼기를 None으로 2차 확인 사살
+    # 스페이스바 공백(" "), "nan" 문자열 등 모든 형태의 찌꺼기를 None으로 2차 확인 사살
     for row in records:
         for key, value in row.items():
             if isinstance(value, str):
@@ -40,14 +45,10 @@ try:
                 else:
                     row[key] = cleaned_val
 
-    print(f"✅ BigQuery 데이터 로드 완료: 총 {len(records)}건")
+    print(f"✅ 데이터 전처리 완료: 최종 전송 대기 {len(records)}건")
 except Exception as e:
     print(f"❌ BigQuery 읽기 실패: {e}")
-    sys.exit(1)
-
-if not records:
-    print("⚠️ BigQuery에 전송할 데이터가 없습니다.")
-    sys.exit(0)
+    sys.exit(1))
 
 # 3. Supabase 전송 세팅
 API_URL = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"

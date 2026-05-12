@@ -170,9 +170,9 @@ def wait_for_download_complete(dirpath: str, timeout: int = 1000) -> None:
 
 # ===== Main =====
 driver = make_driver(headless=True)
-driver.command_executor.set_timeout(1800)
-driver.set_script_timeout(1800)
-driver.set_page_load_timeout(1800)
+driver.command_executor.set_timeout(300)
+driver.set_script_timeout(60)
+driver.set_page_load_timeout(120)
 try:
     do_login(driver)
     goto_with_auth(driver, LIST_URL)
@@ -196,7 +196,7 @@ try:
         driver.execute_script("fnPageExl('X14');")
 
     accept_alert_safe(driver, timeout=5)
-    wait_for_download_complete(downloads_folder, timeout=1000)
+    wait_for_download_complete(downloads_folder, timeout=120)
 
 finally:
     try:

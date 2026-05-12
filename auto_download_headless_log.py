@@ -38,13 +38,13 @@ sys.stdout = sys.stderr = DualLogger("log.txt")
 RUNNER = os.getenv("GITHUB_ACTIONS") == "true"
 
 # BigQuery
-PROJECT_ID = os.getenv("GCP_PROJECT") or "savvy-mantis-457008-k6"
+PROJECT_ID = os.environ["GCP_PROJECT"]
 DATASET_ID = os.getenv("BQ_DATASET") or "raw_data"
 TABLE_ID = os.getenv("BQ_TABLE") or "goods_csv"
 
 # Login
-LOGIN_ID = os.getenv("LOGIN_ID") or "ppazic"
-LOGIN_PW = os.getenv("LOGIN_PW") or "123123"
+LOGIN_ID = os.environ["LOGIN_ID"]
+LOGIN_PW = os.environ["LOGIN_PW"]
 
 # Download folder
 if RUNNER:

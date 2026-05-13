@@ -22,7 +22,6 @@ import json
 import gspread
 from gspread_dataframe import set_with_dataframe
 
-# 재시도 로직에서 일시적 에러로 간주하고 다시 시도할 예외 종류 모음
 RETRYABLE_ERRORS = (
     TimeoutException,
     WebDriverException,
@@ -64,6 +63,17 @@ LOGIN_PW = os.environ["LOGIN_PW"]
 # Google Sheets
 GSHEET_ID = os.getenv("GSHEET_ID")
 GSHEET_WORKSHEET = os.getenv("GSHEET_WORKSHEET") or "raw_data"
+
+# Customer tabs config (회원고유번호 → 탭 이름 매핑)
+# JSON 형식: {"회원고유번호1": "탭이름1", ...}
+CUSTOMER_TABS_JSON = os.getenv("GSHEET_CUSTOMER_TABS", "{}")
+try:
+    CUSTOMER_TABS = json.loads(CUSTOMER_TABS_JSON)
+except json.JSONDecodeError as e:
+    print(f"⚠️ GSHEET_CUSTOMER_TABS JSON 파싱 실패: {e}")
+    CUSTOMER_TABS = {}
+
+CUSTOMER_ID_COLUMN = "회원고유번호"
 
 # Download folder
 if RUNNER:
@@ -119,7 +129,6 @@ def make_driver(headless: bool = True) -> webdriver.Chrome:
 
     driver = webdriver.Chrome(options=options)
 
-    # HTTP 클라이언트(urllib3) 타임아웃 설정
     try:
         driver.command_executor._client_config.timeout = 300
     except AttributeError:
@@ -230,6 +239,38 @@ def wait_for_download_complete(dirpath: str, timeout: int = 1000) -> None:
         time.sleep(0.8)
     raise TimeoutError("다운로드 완료 대기 시간 초과")
 
+def push_df_to_worksheet(spreadsheet, tab_name: str, df_data: pd.DataFrame) -> None:
+    """주어진 탭에 데이터프레임을 클리어 후 쓰기. 탭 없으면 생성."""
+    try:
+        ws = spreadsheet.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        print(f"[INFO] 탭 '{tab_name}' 없음 → 새로 생성")
+        ws = spreadsheet.add_worksheet(
+            title=tab_name,
+            rows=max(len(df_data) + 100, 100),
+            cols=max(len(df_data.columns) + 5, 26),
+        )
+
+    ws.clear()
+
+    if len(df_data) > 0:
+        set_with_dataframe(
+            ws,
+            df_data,
+            include_index=False,
+            include_column_header=True,
+            resize=True,
+        )
+    else:
+        # 빈 결과면 헤더만 쓰기
+        set_with_dataframe(
+            ws,
+            df_data.iloc[0:0],
+            include_index=False,
+            include_column_header=True,
+            resize=False,
+        )
+
 
 # ===== Main =====
 driver = make_driver(headless=True)
@@ -283,7 +324,7 @@ try:
 except Exception:
     df = pd.read_csv(latest_file, encoding="cp949", dtype=str, on_bad_lines="skip")
 
-print(f"📊 데이터 로딩 완료: {len(df)} rows")
+print(f"📊 데이터 로딩 완료: {len(df)} rows × {len(df.columns)} cols")
 
 def sanitize_columns(cols):
     seen = {}
@@ -320,8 +361,7 @@ job.result()
 print(f"✅ BigQuery 업로드 성공: {len(df_bq)}건 → {full_table_id}")
 
 # =====================================================================
-# 📊 Google Sheets로 원본 데이터 푸시
-# (google.auth.default() 사용 — BQ와 동일한 인증 방식, 모든 credential 타입 호환)
+# 📊 Google Sheets 푸시 (raw_data 전체 탭 + 고객사별 분할 탭)
 # =====================================================================
 print("📊 Google Sheets로 데이터 전송 시작...")
 
@@ -329,8 +369,6 @@ if not GSHEET_ID:
     print("⚠️ GSHEET_ID 환경변수가 설정되지 않아 Sheets 전송을 건너뜁니다.")
 else:
     try:
-        # google.auth로 ADC(Application Default Credentials) 사용
-        # GOOGLE_APPLICATION_CREDENTIALS 환경변수, WIF, GCE 메타데이터 등 모두 자동 처리
         creds, _ = google.auth.default(
             scopes=[
                 "https://www.googleapis.com/auth/spreadsheets",
@@ -339,41 +377,60 @@ else:
         )
         gc = gspread.authorize(creds)
         spreadsheet = gc.open_by_key(GSHEET_ID)
+        print(f"[INFO] 스프레드시트 열기 성공: {spreadsheet.title}")
 
-        # 대상 시트(탭) 찾기. 없으면 새로 생성
+        # --- 1) 전체 raw_data 탭 (관리자/백업용) ---
         try:
-            worksheet = spreadsheet.worksheet(GSHEET_WORKSHEET)
-            print(f"[INFO] 시트 탭 발견: {GSHEET_WORKSHEET}")
-        except gspread.WorksheetNotFound:
-            print(f"[INFO] 시트 탭 '{GSHEET_WORKSHEET}' 없음. 새로 생성합니다.")
-            worksheet = spreadsheet.add_worksheet(
-                title=GSHEET_WORKSHEET,
-                rows=len(df) + 100,
-                cols=len(df.columns) + 5,
+            print(f"[INFO] raw_data 탭 푸시 시작 ({len(df):,}건)")
+            push_df_to_worksheet(spreadsheet, GSHEET_WORKSHEET, df)
+            print(f"✅ raw_data 푸시 완료: {len(df):,}건 → {GSHEET_WORKSHEET}")
+        except Exception as e:
+            print(f"❌ raw_data 푸시 실패: {type(e).__name__}: {e}")
+
+        # --- 2) 고객사별 분할 탭 ---
+        if not CUSTOMER_TABS:
+            print("[INFO] CUSTOMER_TABS 비어있음. 고객사 분할 탭 건너뜀.")
+        elif CUSTOMER_ID_COLUMN not in df.columns:
+            print(f"⚠️ '{CUSTOMER_ID_COLUMN}' 컬럼이 데이터에 없음. 고객사 분할 탭 건너뜀.")
+            print(f"[DIAG] 사용 가능한 컬럼: {list(df.columns)[:10]}...")
+        else:
+            # 회원고유번호 컬럼을 문자열로 정규화 (비교 시 일치하도록)
+            df_normalized = df.copy()
+            df_normalized[CUSTOMER_ID_COLUMN] = (
+                df_normalized[CUSTOMER_ID_COLUMN].astype(str).str.strip()
             )
 
-        # 기존 데이터 전부 삭제 후 새 데이터 쓰기
-        # (Sheets는 원본 컬럼명 그대로 유지 — 고객사 IMPORTRANGE 호환성 위해)
-        worksheet.clear()
-        set_with_dataframe(
-            worksheet,
-            df,  # sanitize 안 한 원본 컬럼명 그대로 사용
-            include_index=False,
-            include_column_header=True,
-            resize=True,  # 시트 크기를 데이터에 맞게 자동 조정
-        )
+            print(f"📊 고객사 분할 탭 생성 시작 ({len(CUSTOMER_TABS)}개)")
 
-        print(f"✅ Google Sheets 업로드 성공: {len(df)}건 → {GSHEET_WORKSHEET}")
+            for member_id, tab_name in CUSTOMER_TABS.items():
+                try:
+                    member_id_str = str(member_id).strip()
+                    df_customer = df_normalized[
+                        df_normalized[CUSTOMER_ID_COLUMN] == member_id_str
+                    ]
+
+                    print(f"  [{member_id} → {tab_name}] 매칭: {len(df_customer):,}건")
+                    push_df_to_worksheet(spreadsheet, tab_name, df_customer)
+                    print(f"  ✅ {tab_name} 완료")
+
+                except Exception as e:
+                    print(f"  ❌ {member_id} ({tab_name}) 실패: {type(e).__name__}: {e}")
+                    # 한 고객사 실패해도 다른 고객사는 계속 진행
+                    continue
+
+            print(f"✅ 고객사 분할 탭 처리 완료")
 
     except gspread.exceptions.SpreadsheetNotFound:
         print(f"❌ Spreadsheet를 찾을 수 없음. GSHEET_ID 또는 공유 권한 확인 필요.")
     except gspread.exceptions.APIError as e:
         print(f"❌ Google Sheets API 에러: {e}")
     except Exception as e:
+        import traceback
         print(f"❌ Google Sheets 전송 실패: {type(e).__name__}: {e}")
+        traceback.print_exc()
 
 # =====================================================================
-# 🚀 [완결판] Supabase 전송 파이프라인 (무조건 덮어쓰기 + 빈칸 청소)
+# 🚀 Supabase 전송 파이프라인
 # =====================================================================
 print("🚀 Supabase로 데이터 전송 시작...")
 
@@ -432,4 +489,4 @@ else:
         except Exception as e:
             print(f"❌ 전송 중 통신 에러 발생: {e}")
 
-    print("🎉 크롤링 -> BigQuery -> Sheets -> Supabase 모든 자동화 파이프라인 완료!")
+    print("🎉 크롤링 -> BigQuery -> Sheets(전체+고객사) -> Supabase 모든 자동화 파이프라인 완료!")

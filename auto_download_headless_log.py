@@ -170,9 +170,8 @@ def wait_for_download_complete(dirpath: str, timeout: int = 1000) -> None:
 
 # ===== Main =====
 driver = make_driver(headless=True)
-driver.command_executor.set_timeout(300)
 driver.set_script_timeout(60)
-driver.set_page_load_timeout(120)
+driver.set_page_load_timeout(180)
 try:
     do_login(driver)
     goto_with_auth(driver, LIST_URL)

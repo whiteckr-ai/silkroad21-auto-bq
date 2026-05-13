@@ -320,54 +320,27 @@ job.result()
 print(f"✅ BigQuery 업로드 성공: {len(df_bq)}건 → {full_table_id}")
 
 # =====================================================================
-# 📊 Google Sheets로 원본 데이터 푸시 (진단 모드)
+# 📊 Google Sheets로 원본 데이터 푸시
+# (google.auth.default() 사용 — BQ와 동일한 인증 방식, 모든 credential 타입 호환)
 # =====================================================================
 print("📊 Google Sheets로 데이터 전송 시작...")
-
-# === 진단 정보 출력 ===
-print(f"[DIAG] GOOGLE_APPLICATION_CREDENTIALS = {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')}")
-print(f"[DIAG] GOOGLE_CREDS 변수 값 = {GOOGLE_CREDS}")
-print(f"[DIAG] GSHEET_ID = {GSHEET_ID}")
-print(f"[DIAG] GSHEET_WORKSHEET = {GSHEET_WORKSHEET}")
-
-try:
-    from pathlib import Path as _P
-    creds_path = _P(GOOGLE_CREDS) if GOOGLE_CREDS else None
-    if creds_path:
-        print(f"[DIAG] credentials 파일 존재: {creds_path.exists()}")
-        if creds_path.exists():
-            print(f"[DIAG] 파일 크기: {creds_path.stat().st_size} bytes")
-            print(f"[DIAG] 파일 권한: {oct(creds_path.stat().st_mode)}")
-            try:
-                with open(creds_path, 'r') as f:
-                    content_preview = f.read(100)
-                print(f"[DIAG] 파일 읽기 성공, 처음 100자: {content_preview[:80]}...")
-            except Exception as fe:
-                print(f"[DIAG] 파일 직접 읽기 실패: {type(fe).__name__}: {fe}")
-except Exception as e:
-    print(f"[DIAG] 진단 중 에러: {e}")
 
 if not GSHEET_ID:
     print("⚠️ GSHEET_ID 환경변수가 설정되지 않아 Sheets 전송을 건너뜁니다.")
 else:
     try:
-        print("[DIAG] google.auth.default() 호출 시도...")
-        creds, project = google.auth.default(
+        # google.auth로 ADC(Application Default Credentials) 사용
+        # GOOGLE_APPLICATION_CREDENTIALS 환경변수, WIF, GCE 메타데이터 등 모두 자동 처리
+        creds, _ = google.auth.default(
             scopes=[
                 "https://www.googleapis.com/auth/spreadsheets",
                 "https://www.googleapis.com/auth/drive",
             ]
         )
-        print(f"[DIAG] 인증 성공. project={project}, creds type={type(creds).__name__}")
-        
-        print("[DIAG] gspread.authorize() 호출 시도...")
         gc = gspread.authorize(creds)
-        print("[DIAG] gspread client 생성 완료")
-        
-        print("[DIAG] spreadsheet open 시도...")
         spreadsheet = gc.open_by_key(GSHEET_ID)
-        print(f"[DIAG] spreadsheet 열기 성공: {spreadsheet.title}")
 
+        # 대상 시트(탭) 찾기. 없으면 새로 생성
         try:
             worksheet = spreadsheet.worksheet(GSHEET_WORKSHEET)
             print(f"[INFO] 시트 탭 발견: {GSHEET_WORKSHEET}")
@@ -379,23 +352,26 @@ else:
                 cols=len(df.columns) + 5,
             )
 
+        # 기존 데이터 전부 삭제 후 새 데이터 쓰기
+        # (Sheets는 원본 컬럼명 그대로 유지 — 고객사 IMPORTRANGE 호환성 위해)
         worksheet.clear()
         set_with_dataframe(
             worksheet,
-            df,
+            df,  # sanitize 안 한 원본 컬럼명 그대로 사용
             include_index=False,
             include_column_header=True,
-            resize=True,
+            resize=True,  # 시트 크기를 데이터에 맞게 자동 조정
         )
 
         print(f"✅ Google Sheets 업로드 성공: {len(df)}건 → {GSHEET_WORKSHEET}")
 
+    except gspread.exceptions.SpreadsheetNotFound:
+        print(f"❌ Spreadsheet를 찾을 수 없음. GSHEET_ID 또는 공유 권한 확인 필요.")
+    except gspread.exceptions.APIError as e:
+        print(f"❌ Google Sheets API 에러: {e}")
     except Exception as e:
-        import traceback
         print(f"❌ Google Sheets 전송 실패: {type(e).__name__}: {e}")
-        print("[DIAG] === 전체 traceback ===")
-        traceback.print_exc()
-        print("[DIAG] === traceback 끝 ===")
+
 # =====================================================================
 # 🚀 [완결판] Supabase 전송 파이프라인 (무조건 덮어쓰기 + 빈칸 청소)
 # =====================================================================

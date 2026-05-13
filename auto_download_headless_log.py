@@ -15,6 +15,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from google.cloud import bigquery
+import google.auth
 import urllib3.exceptions
 import requests
 import json
@@ -142,7 +143,6 @@ def make_driver(headless: bool = True) -> webdriver.Chrome:
     return driver
 
 def do_login(driver: webdriver.Chrome, max_retries: int = 3) -> None:
-    """로그인 시도. 일시적 타임아웃에 대비해 최대 max_retries번 재시도."""
     wait = WebDriverWait(driver, 20)
     last_error = None
 
@@ -193,7 +193,6 @@ def do_login(driver: webdriver.Chrome, max_retries: int = 3) -> None:
     raise RuntimeError(f"로그인 {max_retries}회 모두 실패. 마지막 에러: {last_error}")
 
 def goto_with_auth(driver: webdriver.Chrome, url: str, login_hint: str = "Login.asp", max_retries: int = 3) -> None:
-    """페이지 이동. 타임아웃 시 재시도하며, 로그인 페이지로 튕기면 재로그인."""
     last_error = None
 
     for attempt in range(1, max_retries + 1):
@@ -322,7 +321,7 @@ print(f"✅ BigQuery 업로드 성공: {len(df_bq)}건 → {full_table_id}")
 
 # =====================================================================
 # 📊 Google Sheets로 원본 데이터 푸시
-# (raw_data 시트 전체 덮어쓰기. 고객사 시트는 IMPORTRANGE 등으로 여기서 참조)
+# (google.auth.default() 사용 — BQ와 동일한 인증 방식, 모든 credential 타입 호환)
 # =====================================================================
 print("📊 Google Sheets로 데이터 전송 시작...")
 
@@ -330,8 +329,15 @@ if not GSHEET_ID:
     print("⚠️ GSHEET_ID 환경변수가 설정되지 않아 Sheets 전송을 건너뜁니다.")
 else:
     try:
-        # 기존 BQ용 서비스 계정 그대로 사용
-        gc = gspread.service_account(filename=GOOGLE_CREDS)
+        # google.auth로 ADC(Application Default Credentials) 사용
+        # GOOGLE_APPLICATION_CREDENTIALS 환경변수, WIF, GCE 메타데이터 등 모두 자동 처리
+        creds, _ = google.auth.default(
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ]
+        )
+        gc = gspread.authorize(creds)
         spreadsheet = gc.open_by_key(GSHEET_ID)
 
         # 대상 시트(탭) 찾기. 없으면 새로 생성
@@ -378,7 +384,6 @@ SUPABASE_TABLE = os.getenv("SUPABASE_TABLE")
 if not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_TABLE:
     print("❌ Supabase 환경변수가 설정되지 않아 전송을 중지합니다.")
 else:
-    # Supabase는 sanitize된 컬럼명 + 중복 제거된 df_bq 기준 사용
     df_sup = df_bq.copy()
 
     if '아이템번호' in df_sup.columns:

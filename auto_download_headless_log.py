@@ -13,10 +13,22 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from google.cloud import bigquery
+import urllib3.exceptions
 import requests
 import json
+
+# 재시도 로직에서 일시적 에러로 간주하고 다시 시도할 예외 종류 모음
+RETRYABLE_ERRORS = (
+    TimeoutException,
+    WebDriverException,
+    urllib3.exceptions.ReadTimeoutError,
+    urllib3.exceptions.ConnectTimeoutError,
+    urllib3.exceptions.ProtocolError,
+    TimeoutError,
+    ConnectionError,
+)
 
 # ===== Stdout to log.txt =====
 class DualLogger:
@@ -100,6 +112,20 @@ def make_driver(headless: bool = True) -> webdriver.Chrome:
 
     driver = webdriver.Chrome(options=options)
 
+    # HTTP 클라이언트(urllib3) 타임아웃 설정
+    # 페이지 로드 타임아웃(180초)보다 크게 잡아야 레이어 충돌 없음
+    try:
+        driver.command_executor._client_config.timeout = 300
+    except AttributeError:
+        # 구버전 호환 (deprecated 방식)
+        try:
+            driver.command_executor.set_timeout(300)
+        except Exception:
+            pass
+
+    driver.set_script_timeout(60)
+    driver.set_page_load_timeout(180)
+
     try:
         driver.execute_cdp_cmd(
             "Page.setDownloadBehavior",
@@ -111,47 +137,82 @@ def make_driver(headless: bool = True) -> webdriver.Chrome:
     driver.implicitly_wait(5)
     return driver
 
-def do_login(driver: webdriver.Chrome) -> None:
-    driver.get(LOGIN_URL)
+def do_login(driver: webdriver.Chrome, max_retries: int = 3) -> None:
+    """로그인 시도. 일시적 타임아웃에 대비해 최대 max_retries번 재시도."""
     wait = WebDriverWait(driver, 20)
+    last_error = None
 
-    id_el = wait.until(EC.presence_of_element_located((By.NAME, "sMemId")))
-    pw_el = wait.until(EC.presence_of_element_located((By.NAME, "sMemPw")))
-
-    for el, val in ((id_el, LOGIN_ID), (pw_el, LOGIN_PW)):
+    for attempt in range(1, max_retries + 1):
         try:
-            el.clear()
-        except Exception:
-            pass
-        el.send_keys(val)
-    pw_el.send_keys(Keys.RETURN)
+            print(f"[INFO] 로그인 시도 {attempt}/{max_retries}")
+            driver.get(LOGIN_URL)
 
-    if accept_alert_safe(driver, timeout=3):
-        id_el = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "sMemId")))
-        pw_el = driver.find_element(By.NAME, "sMemPw")
-        id_el.clear()
-        id_el.send_keys(LOGIN_ID)
-        pw_el.clear()
-        pw_el.send_keys(LOGIN_PW)
-        pw_el.send_keys(Keys.RETURN)
-        accept_alert_safe(driver, timeout=2)
+            id_el = wait.until(EC.presence_of_element_located((By.NAME, "sMemId")))
+            pw_el = wait.until(EC.presence_of_element_located((By.NAME, "sMemPw")))
 
-    try:
-        wait.until(lambda d: "Login.asp" not in d.current_url)
-    except TimeoutException:
+            for el, val in ((id_el, LOGIN_ID), (pw_el, LOGIN_PW)):
+                try:
+                    el.clear()
+                except Exception:
+                    pass
+                el.send_keys(val)
+            pw_el.send_keys(Keys.RETURN)
+
+            if accept_alert_safe(driver, timeout=3):
+                id_el = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "sMemId")))
+                pw_el = driver.find_element(By.NAME, "sMemPw")
+                id_el.clear()
+                id_el.send_keys(LOGIN_ID)
+                pw_el.clear()
+                pw_el.send_keys(LOGIN_PW)
+                pw_el.send_keys(Keys.RETURN)
+                accept_alert_safe(driver, timeout=2)
+
+            try:
+                wait.until(lambda d: "Login.asp" not in d.current_url)
+            except TimeoutException:
+                # 폼 submit 버튼이 있다면 한 번 더 시도
+                btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
+                btn.click()
+                WebDriverWait(driver, 10).until(lambda d: "Login.asp" not in d.current_url)
+
+            print("[INFO] 로그인 성공")
+            return  # 성공 시 종료
+
+        except RETRYABLE_ERRORS as e:
+            last_error = e
+            print(f"[WARN] 로그인 시도 {attempt} 실패: {type(e).__name__}: {str(e)[:200]}")
+            if attempt < max_retries:
+                wait_sec = 15 * attempt  # 15초, 30초, 45초로 점진적 대기
+                print(f"[INFO] {wait_sec}초 후 재시도합니다...")
+                time.sleep(wait_sec)
+
+    raise RuntimeError(f"로그인 {max_retries}회 모두 실패. 마지막 에러: {last_error}")
+
+def goto_with_auth(driver: webdriver.Chrome, url: str, login_hint: str = "Login.asp", max_retries: int = 3) -> None:
+    """페이지 이동. 타임아웃 시 재시도하며, 로그인 페이지로 튕기면 재로그인."""
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
         try:
-            btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
-            btn.click()
-            WebDriverWait(driver, 10).until(lambda d: "Login.asp" not in d.current_url)
-        except Exception:
-            raise RuntimeError("로그인에 실패했습니다. 계정/셀렉터 확인 필요")
+            print(f"[INFO] 페이지 이동 시도 {attempt}/{max_retries}: {url}")
+            driver.get(url)
+            time.sleep(0.5)
+            if login_hint in driver.current_url:
+                print("[INFO] 로그인 페이지로 리다이렉트됨, 재로그인 진행")
+                do_login(driver)
+                driver.get(url)
+            return  # 성공 시 종료
 
-def goto_with_auth(driver: webdriver.Chrome, url: str, login_hint: str = "Login.asp") -> None:
-    driver.get(url)
-    time.sleep(0.5)
-    if login_hint in driver.current_url:
-        do_login(driver)
-        driver.get(url)
+        except RETRYABLE_ERRORS as e:
+            last_error = e
+            print(f"[WARN] 페이지 이동 시도 {attempt} 실패: {type(e).__name__}: {str(e)[:200]}")
+            if attempt < max_retries:
+                wait_sec = 15 * attempt
+                print(f"[INFO] {wait_sec}초 후 재시도합니다...")
+                time.sleep(wait_sec)
+
+    raise RuntimeError(f"페이지 이동 {max_retries}회 모두 실패. 마지막 에러: {last_error}")
 
 def wait_for_download_complete(dirpath: str, timeout: int = 1000) -> None:
     end = time.time() + timeout
@@ -170,8 +231,6 @@ def wait_for_download_complete(dirpath: str, timeout: int = 1000) -> None:
 
 # ===== Main =====
 driver = make_driver(headless=True)
-driver.set_script_timeout(60)
-driver.set_page_load_timeout(180)
 try:
     do_login(driver)
     goto_with_auth(driver, LIST_URL)
@@ -309,12 +368,12 @@ else:
         try:
             response = requests.post(upsert_url, headers=insert_headers, json=chunk, timeout=60)
             current_chunk = (i // chunk_size) + 1
-            
+
             if response.status_code in [200, 201, 204]:
                 print(f"📡 [{current_chunk}/{total_chunks}회차] 덮어쓰기 전송 성공")
             else:
                 print(f"❌ [{current_chunk}/{total_chunks}회차] 실패: {response.text}")
-                
+
         except Exception as e:
             print(f"❌ 전송 중 통신 에러 발생: {e}")
 

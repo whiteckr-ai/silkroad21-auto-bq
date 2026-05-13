@@ -18,6 +18,8 @@ from google.cloud import bigquery
 import urllib3.exceptions
 import requests
 import json
+import gspread
+from gspread_dataframe import set_with_dataframe
 
 # 재시도 로직에서 일시적 에러로 간주하고 다시 시도할 예외 종류 모음
 RETRYABLE_ERRORS = (
@@ -57,6 +59,10 @@ TABLE_ID = os.getenv("BQ_TABLE") or "goods_csv"
 # Login
 LOGIN_ID = os.environ["LOGIN_ID"]
 LOGIN_PW = os.environ["LOGIN_PW"]
+
+# Google Sheets
+GSHEET_ID = os.getenv("GSHEET_ID")
+GSHEET_WORKSHEET = os.getenv("GSHEET_WORKSHEET") or "raw_data"
 
 # Download folder
 if RUNNER:
@@ -113,11 +119,9 @@ def make_driver(headless: bool = True) -> webdriver.Chrome:
     driver = webdriver.Chrome(options=options)
 
     # HTTP 클라이언트(urllib3) 타임아웃 설정
-    # 페이지 로드 타임아웃(180초)보다 크게 잡아야 레이어 충돌 없음
     try:
         driver.command_executor._client_config.timeout = 300
     except AttributeError:
-        # 구버전 호환 (deprecated 방식)
         try:
             driver.command_executor.set_timeout(300)
         except Exception:
@@ -171,19 +175,18 @@ def do_login(driver: webdriver.Chrome, max_retries: int = 3) -> None:
             try:
                 wait.until(lambda d: "Login.asp" not in d.current_url)
             except TimeoutException:
-                # 폼 submit 버튼이 있다면 한 번 더 시도
                 btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
                 btn.click()
                 WebDriverWait(driver, 10).until(lambda d: "Login.asp" not in d.current_url)
 
             print("[INFO] 로그인 성공")
-            return  # 성공 시 종료
+            return
 
         except RETRYABLE_ERRORS as e:
             last_error = e
             print(f"[WARN] 로그인 시도 {attempt} 실패: {type(e).__name__}: {str(e)[:200]}")
             if attempt < max_retries:
-                wait_sec = 15 * attempt  # 15초, 30초, 45초로 점진적 대기
+                wait_sec = 15 * attempt
                 print(f"[INFO] {wait_sec}초 후 재시도합니다...")
                 time.sleep(wait_sec)
 
@@ -202,7 +205,7 @@ def goto_with_auth(driver: webdriver.Chrome, url: str, login_hint: str = "Login.
                 print("[INFO] 로그인 페이지로 리다이렉트됨, 재로그인 진행")
                 do_login(driver)
                 driver.get(url)
-            return  # 성공 시 종료
+            return
 
         except RETRYABLE_ERRORS as e:
             last_error = e
@@ -300,20 +303,68 @@ def sanitize_columns(cols):
         out.append(c)
     return out
 
-df.columns = sanitize_columns(df.columns)
-df = df.dropna(how="all").drop_duplicates()
-print("🧹 데이터 정제 완료")
+# BQ 적재용 (컬럼명 sanitize 필요)
+df_bq = df.copy()
+df_bq.columns = sanitize_columns(df_bq.columns)
+df_bq = df_bq.dropna(how="all").drop_duplicates()
+print("🧹 BQ용 데이터 정제 완료")
 
 client = bigquery.Client(project=PROJECT_ID)
 full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 job = client.load_table_from_dataframe(
-    df,
+    df_bq,
     full_table_id,
     location="asia-northeast3",
     job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE"),
 )
 job.result()
-print(f"✅ BigQuery 업로드 성공: {len(df)}건 → {full_table_id}")
+print(f"✅ BigQuery 업로드 성공: {len(df_bq)}건 → {full_table_id}")
+
+# =====================================================================
+# 📊 Google Sheets로 원본 데이터 푸시
+# (raw_data 시트 전체 덮어쓰기. 고객사 시트는 IMPORTRANGE 등으로 여기서 참조)
+# =====================================================================
+print("📊 Google Sheets로 데이터 전송 시작...")
+
+if not GSHEET_ID:
+    print("⚠️ GSHEET_ID 환경변수가 설정되지 않아 Sheets 전송을 건너뜁니다.")
+else:
+    try:
+        # 기존 BQ용 서비스 계정 그대로 사용
+        gc = gspread.service_account(filename=GOOGLE_CREDS)
+        spreadsheet = gc.open_by_key(GSHEET_ID)
+
+        # 대상 시트(탭) 찾기. 없으면 새로 생성
+        try:
+            worksheet = spreadsheet.worksheet(GSHEET_WORKSHEET)
+            print(f"[INFO] 시트 탭 발견: {GSHEET_WORKSHEET}")
+        except gspread.WorksheetNotFound:
+            print(f"[INFO] 시트 탭 '{GSHEET_WORKSHEET}' 없음. 새로 생성합니다.")
+            worksheet = spreadsheet.add_worksheet(
+                title=GSHEET_WORKSHEET,
+                rows=len(df) + 100,
+                cols=len(df.columns) + 5,
+            )
+
+        # 기존 데이터 전부 삭제 후 새 데이터 쓰기
+        # (Sheets는 원본 컬럼명 그대로 유지 — 고객사 IMPORTRANGE 호환성 위해)
+        worksheet.clear()
+        set_with_dataframe(
+            worksheet,
+            df,  # sanitize 안 한 원본 컬럼명 그대로 사용
+            include_index=False,
+            include_column_header=True,
+            resize=True,  # 시트 크기를 데이터에 맞게 자동 조정
+        )
+
+        print(f"✅ Google Sheets 업로드 성공: {len(df)}건 → {GSHEET_WORKSHEET}")
+
+    except gspread.exceptions.SpreadsheetNotFound:
+        print(f"❌ Spreadsheet를 찾을 수 없음. GSHEET_ID 또는 공유 권한 확인 필요.")
+    except gspread.exceptions.APIError as e:
+        print(f"❌ Google Sheets API 에러: {e}")
+    except Exception as e:
+        print(f"❌ Google Sheets 전송 실패: {type(e).__name__}: {e}")
 
 # =====================================================================
 # 🚀 [완결판] Supabase 전송 파이프라인 (무조건 덮어쓰기 + 빈칸 청소)
@@ -327,15 +378,16 @@ SUPABASE_TABLE = os.getenv("SUPABASE_TABLE")
 if not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_TABLE:
     print("❌ Supabase 환경변수가 설정되지 않아 전송을 중지합니다.")
 else:
-    # 💡 1. 중복 데이터 완벽 제거 ('아이템번호' 기준 최신화)
-    if '아이템번호' in df.columns:
-        df['아이템번호'] = df['아이템번호'].astype(str).str.strip()
-        df = df.drop_duplicates(subset=['아이템번호'], keep='last')
-        print(f"🧹 Supabase용 중복 제거 완료. 남은 데이터: {len(df)}건")
+    # Supabase는 sanitize된 컬럼명 + 중복 제거된 df_bq 기준 사용
+    df_sup = df_bq.copy()
 
-    # 💡 2. DB 에러 주범인 빈칸(None) 완벽 청소
-    df = df.astype(object).where(pd.notnull(df), None)
-    records = df.to_dict(orient="records")
+    if '아이템번호' in df_sup.columns:
+        df_sup['아이템번호'] = df_sup['아이템번호'].astype(str).str.strip()
+        df_sup = df_sup.drop_duplicates(subset=['아이템번호'], keep='last')
+        print(f"🧹 Supabase용 중복 제거 완료. 남은 데이터: {len(df_sup)}건")
+
+    df_sup = df_sup.astype(object).where(pd.notnull(df_sup), None)
+    records = df_sup.to_dict(orient="records")
 
     for row in records:
         for key, value in row.items():
@@ -346,7 +398,6 @@ else:
                 else:
                     row[key] = cleaned_val
 
-    # 💡 3. Supabase 통신 세팅
     API_URL = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
     auth_headers = {
         "apikey": SUPABASE_KEY,
@@ -357,7 +408,6 @@ else:
     insert_headers["Content-Type"] = "application/json"
     insert_headers["Prefer"] = "return=minimal, resolution=merge-duplicates"
 
-    # 아이템번호 충돌 시 덮어쓰기 타겟 명시
     upsert_url = f"{API_URL}?on_conflict=아이템번호"
 
     chunk_size = 3000
@@ -377,4 +427,4 @@ else:
         except Exception as e:
             print(f"❌ 전송 중 통신 에러 발생: {e}")
 
-    print("🎉 크롤링 -> BigQuery -> Supabase 모든 자동화 파이프라인 완료!")
+    print("🎉 크롤링 -> BigQuery -> Sheets -> Supabase 모든 자동화 파이프라인 완료!")

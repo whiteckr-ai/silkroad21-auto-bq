@@ -48,7 +48,8 @@ jobs:
           BQ_DATASET: ${{ secrets.BQ_DATASET }}
           BQ_TABLE: ${{ secrets.BQ_TABLE }}
           GSHEET_ID: ${{ secrets.GSHEET_ID }}
-          GSHEET_WORKSHEET: ${{ secrets.GSHEET_WORKSHEET }}        
+          GSHEET_WORKSHEET: ${{ secrets.GSHEET_WORKSHEET }}
+          GSHEET_CUSTOMER_TABS: ${{ secrets.GSHEET_CUSTOMER_TABS }}
           # 👇 Supabase 연동 정보 추가 👇
           SUPABASE_URL: "https://sgxharnotdcbcgixzuvc.supabase.co"
           SUPABASE_KEY: "sb_publishable_9TejPrZsFYsa2PBgj0KPaA_-S5ehtOH"

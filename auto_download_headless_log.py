@@ -472,21 +472,40 @@ else:
 
     upsert_url = f"{API_URL}?on_conflict=아이템번호"
 
-    chunk_size = 3000
-    total_chunks = (len(records) // chunk_size) + 1
+import math
 
-    for i in range(0, len(records), chunk_size):
-        chunk = records[i : i + chunk_size]
+chunk_size = 500          # 3000은 timeout 유발 → 작게. 그래도 죽으면 200~300까지 낮춰봐
+total_chunks = math.ceil(len(records) / chunk_size)   # +1 방식은 딱 떨어질 때 1 과다
+failed_chunks = []
+
+for idx, i in enumerate(range(0, len(records), chunk_size), start=1):
+    chunk = records[i : i + chunk_size]
+    success, last_err = False, None
+
+    for attempt in range(1, 6):                # 청크당 최대 5회 진짜 재시도
         try:
-            response = requests.post(upsert_url, headers=insert_headers, json=chunk, timeout=60)
-            current_chunk = (i // chunk_size) + 1
-
-            if response.status_code in [200, 201, 204]:
-                print(f"📡 [{current_chunk}/{total_chunks}회차] 덮어쓰기 전송 성공")
-            else:
-                print(f"❌ [{current_chunk}/{total_chunks}회차] 실패: {response.text}")
-
+            response = requests.post(upsert_url, headers=insert_headers,
+                                     json=chunk, timeout=120)
+            if response.status_code in (200, 201, 204):
+                print(f"📡 [{idx}/{total_chunks}] upsert 성공 ({len(chunk)}건)")
+                success = True
+                break
+            last_err = f"HTTP {response.status_code}: {response.text[:200]}"
+            print(f"⚠️ [{idx}/{total_chunks}] 시도 {attempt} 실패: {last_err}")
         except Exception as e:
-            print(f"❌ 전송 중 통신 에러 발생: {e}")
+            last_err = str(e)
+            print(f"⚠️ [{idx}/{total_chunks}] 시도 {attempt} 통신에러: {last_err}")
+        time.sleep(2 * attempt)               # 지수 백오프
 
+    if not success:
+        failed_chunks.append((idx, last_err))
+        print(f"❌ [{idx}/{total_chunks}] 최종 실패")
+
+if failed_chunks:
+    print(f"🚨 Supabase 실패: {len(failed_chunks)}/{total_chunks} 청크 / "
+          f"약 {len(failed_chunks) * chunk_size:,}건 유실 가능")
+    sys.exit(1)                               # 파이프라인을 '실패'로 종료해야 알아챔
+else:
+    print(f"✅ Supabase 전송 완료: 전체 {len(records):,}건")
+    print("🎉 크롤링 -> BigQuery -> Sheets -> Supabase 파이프라인 완료!")
     print("🎉 크롤링 -> BigQuery -> Sheets(전체+고객사) -> Supabase 모든 자동화 파이프라인 완료!")

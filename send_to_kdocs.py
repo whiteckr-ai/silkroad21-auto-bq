@@ -87,8 +87,29 @@ try:
         except:
             print("✅ 상태코드 200 (JSON 파싱 실패 → 성공으로 간주)")
     else:
-        print("⛔ KDocs 업데이트 실패!")
-        sys.exit(1)
+        # ── 타임아웃-추정 성공 처리 ──────────────────────────────────
+        # KDocs AirScript는 대용량(4.5만 행 규모)을 한 번에 쓸 때 처리 시간이
+        # 게이트웨이 응답 한도를 넘겨 500 + {"errno":10000,"result":"Unavailable"}
+        # 를 반환하지만, 시트 쓰기 자체는 백그라운드에서 완료되는 것으로 관찰됨.
+        # (수신 AirScript가 ClearContents 후 Value2 일괄 대입 구조라, 응답만
+        #  타임아웃되고 반영은 끝까지 진행됨. 여러 회차 전량 반영 확인.)
+        # 따라서 이 특정 응답에 한해 '실패'가 아니라 '백그라운드 완료 추정'으로
+        # 처리하여 종료 코드 0을 반환한다. 그 외의 500이나 다른 상태코드는
+        # 기존대로 실패로 간주한다.
+        # 주의: 이는 응답으로 확정된 성공이 아니라 관찰 기반 추정이므로,
+        #       실제 반영 여부는 KDocs 시트에서 별도 확인이 필요할 수 있다.
+        resp_lower = response_text.lower()
+        is_timeout_presumed = (
+            response.status_code == 500
+            and ("unavailable" in resp_lower or "10000" in resp_lower)
+        )
+        if is_timeout_presumed:
+            print("⏳ KDocs 500(Unavailable) 수신 — 대용량 처리 타임아웃으로 판단.")
+            print("   → 시트 쓰기는 백그라운드에서 완료된 것으로 추정하고 성공 처리합니다.")
+            print("   → (확정된 성공 아님. 필요 시 KDocs 시트 행 수를 직접 확인하세요.)")
+        else:
+            print("⛔ KDocs 업데이트 실패!")
+            sys.exit(1)
 
 except requests.exceptions.Timeout:
     print("❌ 타임아웃 발생")

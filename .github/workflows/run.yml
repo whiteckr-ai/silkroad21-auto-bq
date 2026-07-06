@@ -1,5 +1,19 @@
 name: auto-download-bq
 
+# =====================================================================
+# 통합 워크플로우 (실패 격리 버전)
+#   1) 크롤링 -> BigQuery + Google Sheets + Supabase  (auto_download_headless_log.py)
+#   2) BigQuery -> CSV 추출 (공통)
+#   3) CSV -> XLSX -> OneDrive                        (rclone)
+#   4) CSV -> KDocs AirSheet                          (send_to_kdocs.py)
+#
+# 트리거: cron-job.org 에서 workflow_dispatch 로 30분마다 호출
+# 실패 격리: 각 단계에 if: ${{ !cancelled() }} 를 걸어,
+#            앞 단계가 실패해도 뒤 단계는 계속 시도함.
+#            단계가 실패하면 해당 step 은 빨간 X 로 남고,
+#            워크플로우 전체도 '실패'로 표시되므로 알림/추적 가능.
+# =====================================================================
+
 on:
   workflow_dispatch:
 
@@ -15,6 +29,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ===============================================================
+      # [1] 크롤링 -> BigQuery + Google Sheets + Supabase
+      # ===============================================================
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -39,7 +56,7 @@ jobs:
           echo "Testing curl to silkroad21 /pzadm/Login.asp ..."
           curl -v https://silkroad21.co.kr/pzadm/Login.asp || echo "curl failed"
 
-      - name: Run script
+      - name: Run script (crawl -> BigQuery -> Sheets -> Supabase)
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/bigquery-credentials.json
           LOGIN_ID: ${{ secrets.LOGIN_ID }}
@@ -50,12 +67,169 @@ jobs:
           GSHEET_ID: ${{ secrets.GSHEET_ID }}
           GSHEET_WORKSHEET: ${{ secrets.GSHEET_WORKSHEET }}
           GSHEET_CUSTOMER_TABS: ${{ secrets.GSHEET_CUSTOMER_TABS }}
-          # 👇 Supabase 연동 정보 추가 👇
+          # 👇 Supabase 연동 정보 (원본 유지 — 없으면 스크립트가 죽음) 👇
           SUPABASE_URL: "https://sgxharnotdcbcgixzuvc.supabase.co"
           SUPABASE_KEY: "sb_publishable_9TejPrZsFYsa2PBgj0KPaA_-S5ehtOH"
           SUPABASE_TABLE: "orders" # 💡 Supabase에 만드신 테이블 이름으로 꼭 수정하세요!
         run: python auto_download_headless_log.py
 
+      # ===============================================================
+      # [공통] GCP 인증 + bq 설치 + BigQuery -> CSV 1회 추출
+      #   앞(크롤링)이 실패해도 실행 (BigQuery 기존 데이터로라도 추출)
+      # ===============================================================
+      - name: Auth to GCP (for bq CLI)
+        if: ${{ !cancelled() }}
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+
+      - name: Install gcloud & bq
+        if: ${{ !cancelled() }}
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          install_components: bq
+
+      - name: Check gcloud/bq
+        if: ${{ !cancelled() }}
+        run: |
+          gcloud --version
+          bq version
+
+      - name: Export BigQuery result to CSV (robust)
+        if: ${{ !cancelled() }}
+        id: bq_export
+        env:
+          BQ_SQL: ${{ secrets.BQ_SQL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BQ_SQL:-}" ]; then
+            echo "ERROR: BQ_SQL secret is empty."; exit 1
+          fi
+          printf '%s' "$BQ_SQL" > /tmp/query.sql
+          mkdir -p /tmp/export
+          bq query \
+            --project_id="${{ secrets.GCP_PROJECT_ID }}" \
+            --location=asia-northeast3 \
+            --nouse_legacy_sql \
+            --format=csv \
+            --max_rows=1000000000 \
+            < /tmp/query.sql | tee /tmp/export/bq_export.csv > /dev/null
+
+      - name: Check CSV row count & size
+        if: ${{ !cancelled() }}
+        run: |
+          ls -l /tmp/export/bq_export.csv || true
+          echo "Line count (including header):"
+          wc -l /tmp/export/bq_export.csv || true
+          echo "Head:"; head -n 3 /tmp/export/bq_export.csv || true
+          echo "Tail:"; tail -n 3 /tmp/export/bq_export.csv || true
+
+      # ===============================================================
+      # [3] CSV -> XLSX -> OneDrive
+      #   BigQuery 추출(bq_export)이 성공했을 때만 시도
+      # ===============================================================
+      - name: Convert CSV to Excel (XLSX)
+        if: ${{ !cancelled() && steps.bq_export.outcome == 'success' }}
+        run: |
+          pip install --quiet pandas openpyxl
+          python - <<'PY'
+          import pandas as pd, re
+          from openpyxl import Workbook
+          from openpyxl.utils.dataframe import dataframe_to_rows
+          from openpyxl.styles import numbers
+
+          src = "/tmp/export/bq_export.csv"
+          dst = "/tmp/export/bq_export.xlsx"
+
+          # CSV → DataFrame (모두 문자열로 읽음)
+          df = pd.read_csv(src, dtype=str, encoding="utf-8-sig", low_memory=False)
+          df = df.fillna("")
+
+          # 제어문자 제거
+          illegal = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+          df = df.map(lambda v: illegal.sub("", v) if isinstance(v, str) else v)
+
+          # DataFrame → Excel 워크북
+          wb = Workbook()
+          ws = wb.active
+          ws.title = "Sheet1"
+
+          for r in dataframe_to_rows(df, index=False, header=True):
+              ws.append(r)
+
+          # 숫자로 변환 시도 후 '일반' 서식 적용할 열들
+          target_cols = ["B"] + [chr(c) for c in range(ord("H"), ord("R")+1)]
+          for col in target_cols:
+              for cell in ws[col]:
+                  if cell.row == 1:
+                      continue  # 헤더는 건너뜀
+                  try:
+                      cell.value = float(cell.value)
+                      cell.number_format = numbers.FORMAT_GENERAL
+                  except:
+                      pass  # 숫자 변환 안 되면 그대로 둠 (텍스트 유지)
+
+          wb.save(dst)
+          print("Saved with B, H~R columns as General:", dst)
+          PY
+          ls -l /tmp/export/bq_export.xlsx
+
+      - name: Install rclone and inject config
+        if: ${{ !cancelled() && steps.bq_export.outcome == 'success' }}
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG_B64 }}" | base64 -d > ~/.config/rclone/rclone.conf
+          rclone version
+          rclone lsd onedrive: || { echo "onedrive remote not working"; exit 1; }
+
+      - name: Upload XLSX artifact (for inspection)
+        if: ${{ !cancelled() && steps.bq_export.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bq_export_xlsx_from_action
+          path: /tmp/export/bq_export.xlsx
+
+      - name: Upload to OneDrive (overwrite)
+        if: ${{ !cancelled() && steps.bq_export.outcome == 'success' }}
+        env:
+          TARGET_DIR: "바탕 화면 1/raw data"    # 공유받은 폴더 경로 (슬래시 / 사용)
+          TARGET_FILE: "bigquery_export.xlsx"
+        run: |
+          rclone copyto /tmp/export/bq_export.xlsx "onedrive:${TARGET_DIR}/${TARGET_FILE}" -P
+
+      # ===============================================================
+      # [4] CSV -> KDocs AirSheet
+      #   OneDrive 가 실패해도 독립적으로 시도.
+      #   BigQuery 추출(bq_export)이 성공했을 때만 시도
+      # ===============================================================
+      - name: Install Python dependencies (KDocs)
+        if: ${{ !cancelled() && steps.bq_export.outcome == 'success' }}
+        run: pip install --quiet requests
+
+      - name: Send CSV Data to KDocs AirSheet
+        if: ${{ !cancelled() && steps.bq_export.outcome == 'success' }}
+        env:
+          KDOCS_TOKEN: "1Vg353OyhzW3n27xfSZKUh"
+          KDOCS_TARGET_FILE_ID: "cvViOvb7vj6x"
+          KDOCS_SCRIPT_NAME: "V2-7ywFu9flguvfUNoAffFcws"
+        run: |
+          cp /tmp/export/bq_export.csv result.csv
+
+          echo "========================================"
+          echo "1️⃣ KDocs 일반 AirSheet 업데이트 시작"
+          echo "========================================"
+
+          python send_to_kdocs.py
+
+          echo ""
+          echo "🎉 KDocs AirSheet 업데이트 작업 완료!"
+
+      # ===============================================================
+      # 로그/아티팩트 업로드
+      # ===============================================================
       - name: Upload logs/artifacts
         if: always()
         uses: actions/upload-artifact@v4

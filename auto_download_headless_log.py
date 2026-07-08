@@ -293,7 +293,8 @@ def wait_for_download_complete(dirpath: str, timeout: int = 1000) -> None:
     raise TimeoutError("다운로드 완료 대기 시간 초과")
 
 def push_df_to_worksheet(spreadsheet, tab_name: str, df_data: pd.DataFrame) -> None:
-    """주어진 탭에 데이터프레임을 클리어 후 쓰기. 탭 없으면 생성."""
+    """주어진 탭에 데이터프레임을 씀. 탭 없으면 생성.
+    Clear 없이 덮어쓰기 → 남는 행/열만 나중에 정리 (XLOOKUP 등 참조 중 빈 시트 노출 방지)"""
     try:
         ws = spreadsheet.worksheet(tab_name)
     except gspread.WorksheetNotFound:
@@ -304,7 +305,12 @@ def push_df_to_worksheet(spreadsheet, tab_name: str, df_data: pd.DataFrame) -> N
             cols=max(len(df_data.columns) + 5, 26),
         )
 
-    ws.clear()
+    # 기존에 데이터가 차지하던 행/열 크기 (지우기 전에 미리 확인)
+    old_row_count = ws.row_count
+    old_col_count = ws.col_count
+
+    new_row_count = len(df_data) + 1  # 헤더 포함
+    new_col_count = len(df_data.columns) if len(df_data.columns) > 0 else 1
 
     if len(df_data) > 0:
         set_with_dataframe(
@@ -312,7 +318,7 @@ def push_df_to_worksheet(spreadsheet, tab_name: str, df_data: pd.DataFrame) -> N
             df_data,
             include_index=False,
             include_column_header=True,
-            resize=True,
+            resize=False,
         )
     else:
         # 빈 결과면 헤더만 쓰기
@@ -323,6 +329,13 @@ def push_df_to_worksheet(spreadsheet, tab_name: str, df_data: pd.DataFrame) -> N
             include_column_header=True,
             resize=False,
         )
+
+    # 새 데이터가 예전보다 행/열이 적을 때만, 남는 구간을 마지막에 정리
+    if old_row_count > new_row_count or old_col_count > new_col_count:
+        try:
+            ws.resize(rows=new_row_count, cols=new_col_count)
+        except Exception as e:
+            print(f"[WARN] 남는 구간 정리 실패 (resize): {e}")
 
 
 # ===== Main =====

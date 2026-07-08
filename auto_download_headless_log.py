@@ -119,6 +119,13 @@ def apply_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     else:
         print("⚠️ '수량' 또는 '단가' 컬럼 없음 → '합계' 생성 건너뜀")
 
+    # 3) 대행구분 (환율 == 0 → 배송대행, 그 외(0이 아니거나 값 없음) → 구매대행)
+    if "환율" in df.columns:
+        환율_숫자 = pd.to_numeric(df["환율"], errors="coerce")
+        df["대행구분"] = 환율_숫자.apply(lambda v: "배송대행" if v == 0 else "구매대행")
+    else:
+        print("⚠️ '환율' 컬럼 없음 → '대행구분' 생성 건너뜀")
+
     return df
 
 # Download folder

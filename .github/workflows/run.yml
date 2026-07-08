@@ -212,7 +212,7 @@ jobs:
       - name: Send CSV Data to KDocs AirSheet
         if: ${{ !cancelled() && steps.bq_export.outcome == 'success' }}
         env:
-          KDOCS_TOKEN: "1Vg353OyhzW3n27xfSZKUh"
+          KDOCS_TOKEN: "7v8Eh7vwf09brfL7xMoADh"
           KDOCS_TARGET_FILE_ID: "cvViOvb7vj6x"
           KDOCS_SCRIPT_NAME: "V2-7ywFu9flguvfUNoAffFcws"
         run: |

@@ -75,6 +75,52 @@ except json.JSONDecodeError as e:
 
 CUSTOMER_ID_COLUMN = "회원고유번호"
 
+# ===== 파생 컬럼 규칙 (담당팀 매핑) =====
+# WPS 수식:
+# IF(OR([담당자1]="최국화",[담당자1]="김춘매",[담당자1]="장옥선",[담당자1]="서연연"), "C-TEAM",
+#  IF(OR([담당자1]="박명숙",[담당자1]="지연니"), "A-TEAM",
+#   IF(OR([담당자1]="장춘봉",[담당자1]="왕챈",[담당자1]="진진"), "B-TEAM",
+#    IF(OR([담당자1]="양호원"), "박기훈팀", "팀배정필요"))))
+담당팀_매핑 = {
+    "최국화": "C-TEAM",
+    "김춘매": "C-TEAM",
+    "장옥선": "C-TEAM",
+    "서연연": "C-TEAM",
+    "박명숙": "A-TEAM",
+    "지연니": "A-TEAM",
+    "장춘봉": "B-TEAM",
+    "왕챈":   "B-TEAM",
+    "진진":   "B-TEAM",
+    "양호원": "박기훈팀",
+}
+담당팀_기본값 = "팀배정필요"
+
+def apply_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """BigQuery 업로드 전, 계산/매핑이 필요한 파생 컬럼을 추가합니다.
+    새 파생 컬럼이 필요해지면 이 함수 안에만 추가하면 됩니다."""
+
+    # 1) 담당팀 (담당자1 → 조건부 매핑)
+    if "담당자1" in df.columns:
+        df["담당팀"] = df["담당자1"].map(담당팀_매핑).fillna(담당팀_기본값)
+
+        누락 = df.loc[df["담당팀"] == 담당팀_기본값, "담당자1"].unique()
+        누락 = [v for v in 누락 if v not in (None, "", "nan")]
+        if len(누락) > 0:
+            print(f"⚠️ 담당팀 매핑 안 된 '담당자1' 값: {list(누락)}")
+    else:
+        print("⚠️ '담당자1' 컬럼 없음 → '담당팀' 생성 건너뜀")
+
+    # 2) 합계 (수량 * 단가)
+    if "수량" in df.columns and "단가" in df.columns:
+        df["합계"] = (
+            pd.to_numeric(df["수량"], errors="coerce")
+            * pd.to_numeric(df["단가"], errors="coerce")
+        )
+    else:
+        print("⚠️ '수량' 또는 '단가' 컬럼 없음 → '합계' 생성 건너뜀")
+
+    return df
+
 # Download folder
 if RUNNER:
     downloads_folder = str((Path.cwd() / "downloads").resolve())
@@ -348,6 +394,10 @@ df_bq = df.copy()
 df_bq.columns = sanitize_columns(df_bq.columns)
 df_bq = df_bq.dropna(how="all").drop_duplicates()
 print("🧹 BQ용 데이터 정제 완료")
+
+# ⭐ 파생 컬럼 추가 (담당팀, 합계) — 여기서 처리하면 BigQuery/OneDrive/KDocs 모두 자동 반영
+df_bq = apply_derived_columns(df_bq)
+print(f"➕ 파생 컬럼 추가 완료. 현재 컬럼: {list(df_bq.columns)}")
 
 client = bigquery.Client(project=PROJECT_ID)
 full_table_id = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"

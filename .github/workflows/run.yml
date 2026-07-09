@@ -2,10 +2,10 @@ name: auto-download-bq
 
 # =====================================================================
 # 통합 워크플로우 (실패 격리 버전)
-#   1) 크롤링 -> BigQuery + Google Sheets + Supabase  (auto_download_headless_log.py)
+#   1) 크롤링 -> BigQuery + Google Sheets                  (auto_download_headless_log.py)
 #   2) BigQuery -> CSV 추출 (공통)
-#   3) CSV -> XLSX -> OneDrive                        (rclone)
-#   4) CSV -> KDocs AirSheet                          (send_to_kdocs.py)
+#   3) CSV -> XLSX -> OneDrive                              (rclone)
+#   4) CSV -> KDocs AirSheet                                (send_to_kdocs.py)
 #
 # 트리거: cron-job.org 에서 workflow_dispatch 로 30분마다 호출
 # 실패 격리: 각 단계에 if: ${{ !cancelled() }} 를 걸어,
@@ -30,7 +30,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ===============================================================
-      # [1] 크롤링 -> BigQuery + Google Sheets + Supabase
+      # [1] 크롤링 -> BigQuery + Google Sheets
       # ===============================================================
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -56,7 +56,7 @@ jobs:
           echo "Testing curl to silkroad21 /pzadm/Login.asp ..."
           curl -v https://silkroad21.co.kr/pzadm/Login.asp || echo "curl failed"
 
-      - name: Run script (crawl -> BigQuery -> Sheets -> Supabase)
+      - name: Run script (crawl -> BigQuery -> Sheets)
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/bigquery-credentials.json
           LOGIN_ID: ${{ secrets.LOGIN_ID }}
@@ -67,10 +67,6 @@ jobs:
           GSHEET_ID: ${{ secrets.GSHEET_ID }}
           GSHEET_WORKSHEET: ${{ secrets.GSHEET_WORKSHEET }}
           GSHEET_CUSTOMER_TABS: ${{ secrets.GSHEET_CUSTOMER_TABS }}
-          # 👇 Supabase 연동 정보 (원본 유지 — 없으면 스크립트가 죽음) 👇
-          SUPABASE_URL: "https://sgxharnotdcbcgixzuvc.supabase.co"
-          SUPABASE_KEY: "sb_publishable_9TejPrZsFYsa2PBgj0KPaA_-S5ehtOH"
-          SUPABASE_TABLE: "orders" # 💡 Supabase에 만드신 테이블 이름으로 꼭 수정하세요!
         run: python auto_download_headless_log.py
 
       # ===============================================================

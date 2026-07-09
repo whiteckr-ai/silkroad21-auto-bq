@@ -85,10 +85,23 @@ for attempt in range(1, MAX_RETRIES + 1):
         if response.status_code == 200:
             try:
                 resp_json = response.json()
-                if (resp_json.get("success") is True or
-                    resp_json.get("status") == "success" or
-                    resp_json.get("code") == 0 or
-                    "ok" in str(resp_json).lower()):
+
+                top_status = resp_json.get("status")
+                top_error = resp_json.get("error")
+                data = resp_json.get("data")
+                data_result = data.get("result") if isinstance(data, dict) else None
+
+                is_success = (
+                    # 실제 관찰된 성공 응답 형식: {"data": {..., "result": "Action Completed"},
+                    #                             "error": "", "status": "finished"}
+                    (top_status == "finished" and not top_error)
+                    or data_result == "Action Completed"
+                    or resp_json.get("success") is True
+                    or resp_json.get("status") == "success"
+                    or resp_json.get("code") == 0
+                )
+
+                if is_success:
                     print("✅ KDocs 업데이트 성공!")
                     success = True
                     break

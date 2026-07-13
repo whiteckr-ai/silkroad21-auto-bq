@@ -64,7 +64,7 @@ def send_to_kdocs(cny_rate, krw_rate):
         return
 
     # 대표님이 제공해주신 KDocs 웹훅 URL
-    webhook_url = "https://www.kdocs.cn/api/v3/ide/file/cicR4yEidFqj/script/V2-pgD1PCjAOrmRh8WkVvZx8/sync_task"
+    webhook_url = "https://www.kdocs.cn/api/v3/ide/file/cpNtCZyCV88I/script/V2-pgD1PCjAOrmRh8WkVvZx8/sync_task"
 
     # KDocs로 보낼 데이터 구조 (JSON)
     #  - cny_rate : 관세청 위안화 고시환율
@@ -81,7 +81,7 @@ def send_to_kdocs(cny_rate, krw_rate):
 
     headers = {
         "Content-Type": "application/json",
-        "AirScript-Token": "7v8Eh7vwf09brfL7xMoADh"  # 💡 이 줄이 반드시 추가되어야 합니다.
+        "AirScript-Token": "1Kg3yPgGLOWMmvuTc6eLdD"  # 💡 이 줄이 반드시 추가되어야 합니다.
     }
 
     try:

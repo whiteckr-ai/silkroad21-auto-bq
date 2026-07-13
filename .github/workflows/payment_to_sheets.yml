@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install selenium pandas gspread gspread-dataframe google-auth urllib3
+          pip install selenium pandas gspread gspread-dataframe google-auth urllib3 openpyxl xlrd
 
       - name: Restore Google 서비스계정 credentials 파일
         env:
@@ -54,3 +54,12 @@ jobs:
           name: payment-log
           path: log_payment.txt
           retention-days: 7
+
+      - name: 디버그 스크린샷/다운로드폴더 업로드 (실패 시 확인용)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: payment-debug
+          path: downloads_payment/
+          retention-days: 7
+          if-no-files-found: ignore

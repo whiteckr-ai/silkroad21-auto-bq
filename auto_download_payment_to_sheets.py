@@ -383,7 +383,24 @@ print(f"[INFO] 다운로드된 파일: {os.path.basename(latest_file)}")
 
 ext = Path(latest_file).suffix.lower()
 if ext in (".xls", ".xlsx"):
-    df = pd.read_excel(latest_file, dtype=str)
+    try:
+        df = pd.read_excel(latest_file, dtype=str)
+    except Exception as e:
+        print(f"[WARN] read_excel 실패 → HTML 표 형식으로 재시도: {e}")
+        # 구형 ASP 시스템의 '엑셀 다운로드'는 실제로는 HTML 표를 .xls 확장자로 감싼 경우가 많음
+        tables = None
+        for enc in ("utf-8", "cp949", "euc-kr"):
+            try:
+                tables = pd.read_html(latest_file, encoding=enc)
+                print(f"[INFO] read_html 성공 (encoding={enc}), 테이블 {len(tables)}개 발견")
+                break
+            except Exception as e2:
+                print(f"[WARN] read_html(encoding={enc}) 실패: {e2}")
+        if not tables:
+            raise RuntimeError("read_excel과 read_html 모두 실패. 파일 형식 확인 필요.")
+        # 여러 테이블이 있으면 행이 가장 많은 것을 데이터 본문으로 간주
+        df = max(tables, key=len)
+        df = df.astype(str)
 else:
     try:
         df = pd.read_csv(latest_file, encoding="utf-8-sig", dtype=str, on_bad_lines="skip")

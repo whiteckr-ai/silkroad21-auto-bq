@@ -208,15 +208,23 @@ def goto_with_auth(driver: webdriver.Chrome, url: str, login_hint: str = "Login.
 def wait_for_download_complete(dirpath: str, timeout: int = 1000) -> None:
     end = time.time() + timeout
     pattern_cr = os.path.join(dirpath, "*.crdownload")
-    pattern_csv = os.path.join(dirpath, "*.csv")
+    patterns_done = [
+        os.path.join(dirpath, "*.csv"),
+        os.path.join(dirpath, "*.xls"),
+        os.path.join(dirpath, "*.xlsx"),
+    ]
 
     while time.time() < end:
         if glob.glob(pattern_cr):
             time.sleep(0.8)
             continue
-        if glob.glob(pattern_csv):
+        if any(glob.glob(p) for p in patterns_done):
             return
         time.sleep(0.8)
+
+    # 타임아웃 시 다운로드 폴더 전체 내용을 남겨서 확장자/실제 다운로드 여부 진단
+    all_files = os.listdir(dirpath)
+    print(f"[DEBUG] 다운로드 폴더 전체 파일 목록 ({dirpath}): {all_files}")
     raise TimeoutError("다운로드 완료 대기 시간 초과")
 
 def push_df_to_worksheet(spreadsheet, tab_name: str, df_data: pd.DataFrame) -> None:
@@ -305,6 +313,12 @@ def apply_search_filters(driver: webdriver.Chrome) -> None:
     wait.until(EC.presence_of_element_located((By.ID, "shInsDate")))
     time.sleep(1)  # datebox 위젯 재초기화 대기
 
+    try:
+        driver.save_screenshot(os.path.join(downloads_folder, "_debug_after_search.png"))
+        print("[DEBUG] 검색 후 스크린샷 저장: _debug_after_search.png")
+    except Exception as e:
+        print(f"[WARN] 스크린샷 저장 실패: {e}")
+
 # ===== Main =====
 driver = make_driver(headless=True)
 try:
@@ -332,6 +346,13 @@ try:
         driver.execute_script("fnPageExl('Pmt');")
 
     accept_alert_safe(driver, timeout=5)
+
+    try:
+        driver.save_screenshot(os.path.join(downloads_folder, "_debug_after_export_click.png"))
+        print("[DEBUG] 다운로드 클릭 후 스크린샷 저장: _debug_after_export_click.png")
+    except Exception as e:
+        print(f"[WARN] 스크린샷 저장 실패: {e}")
+
     wait_for_download_complete(downloads_folder, timeout=120)
 
 finally:
@@ -340,9 +361,13 @@ finally:
     except Exception:
         pass
 
-csv_files = glob.glob(os.path.join(downloads_folder, "*.csv"))
+csv_files = []
+for ext in ("*.csv", "*.xls", "*.xlsx"):
+    csv_files.extend(glob.glob(os.path.join(downloads_folder, ext)))
+
 if not csv_files:
-    print("❌ CSV 파일이 존재하지 않습니다. (다운로드 실패)")
+    print("❌ 다운로드된 파일이 존재하지 않습니다. (다운로드 실패)")
+    print(f"[DEBUG] 폴더 전체 목록: {os.listdir(downloads_folder)}")
     sys.exit(1)
 
 latest_file = max(csv_files, key=os.path.getctime)
@@ -354,10 +379,16 @@ for fp in list(csv_files):
         except Exception:
             pass
 
-try:
-    df = pd.read_csv(latest_file, encoding="utf-8-sig", dtype=str, on_bad_lines="skip")
-except Exception:
-    df = pd.read_csv(latest_file, encoding="cp949", dtype=str, on_bad_lines="skip")
+print(f"[INFO] 다운로드된 파일: {os.path.basename(latest_file)}")
+
+ext = Path(latest_file).suffix.lower()
+if ext in (".xls", ".xlsx"):
+    df = pd.read_excel(latest_file, dtype=str)
+else:
+    try:
+        df = pd.read_csv(latest_file, encoding="utf-8-sig", dtype=str, on_bad_lines="skip")
+    except Exception:
+        df = pd.read_csv(latest_file, encoding="cp949", dtype=str, on_bad_lines="skip")
 
 print(f"📊 데이터 로딩 완료: {len(df)} rows × {len(df.columns)} cols")
 

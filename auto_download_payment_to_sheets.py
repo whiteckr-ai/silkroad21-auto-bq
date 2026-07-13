@@ -1,0 +1,391 @@
+from __future__ import annotations
+
+# ===== Imports =====
+import os
+import sys
+import time
+import glob
+import re
+from pathlib import Path
+from datetime import datetime, timedelta
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
+import google.auth
+import urllib3.exceptions
+import gspread
+from gspread_dataframe import set_with_dataframe
+
+RETRYABLE_ERRORS = (
+    TimeoutException,
+    WebDriverException,
+    urllib3.exceptions.ReadTimeoutError,
+    urllib3.exceptions.ConnectTimeoutError,
+    urllib3.exceptions.ProtocolError,
+    TimeoutError,
+    ConnectionError,
+)
+
+# ===== Stdout to log.txt =====
+class DualLogger:
+    def __init__(self, filepath: str):
+        self.terminal = sys.__stdout__
+        self.log = open(filepath, "w", encoding="utf-8")
+
+    def write(self, message: str):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+sys.stdout = sys.stderr = DualLogger("log_payment.txt")
+
+# ===== Environment / Settings =====
+RUNNER = os.getenv("GITHUB_ACTIONS") == "true"
+
+# Login (기존과 동일 계정 사용)
+LOGIN_ID = os.environ["LOGIN_ID"]
+LOGIN_PW = os.environ["LOGIN_PW"]
+
+# Google Sheets (결제내역 전용 신규 스프레드시트)
+GSHEET_ID = os.environ["PAYMENT_GSHEET_ID"]
+GSHEET_WORKSHEET = os.getenv("PAYMENT_GSHEET_WORKSHEET") or "결제내역"
+
+# 날짜 범위: 시작일 고정(2026-01-01), 종료일은 실행 시점 기준 오늘
+START_DATE = os.getenv("PAY_START_DATE", "2026-01-01")
+END_DATE = datetime.now().strftime("%Y-%m-%d")
+
+# Download folder
+if RUNNER:
+    downloads_folder = str((Path.cwd() / "downloads_payment").resolve())
+else:
+    downloads_folder = r"C:\Users\white\Downloads\csv_payment"
+Path(downloads_folder).mkdir(parents=True, exist_ok=True)
+
+# URLs
+LOGIN_URL = "https://silkroad21.co.kr/pzadm/Login.asp"
+PAYMENT_URL = "https://silkroad21.co.kr/Admin/Acting/Pay_End_Pmt_S.asp?shTbTy=PMT&gMnu1=101&gMnu2=10105"
+
+# ===== Helpers (기존 스크립트와 동일) =====
+def accept_alert_safe(driver, timeout: int = 3) -> bool:
+    try:
+        WebDriverWait(driver, timeout).until(EC.alert_is_present())
+        alert = driver.switch_to.alert
+        print("[ALERT]", alert.text)
+        alert.accept()
+        return True
+    except Exception:
+        return False
+
+def make_driver(headless: bool = True) -> webdriver.Chrome:
+    options = webdriver.ChromeOptions()
+    if headless:
+        options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--remote-allow-origins=*")
+    options.add_experimental_option(
+        "prefs",
+        {
+            "download.default_directory": downloads_folder,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True,
+            "download.extensions_to_open": "",
+        },
+    )
+
+    chrome_bin = os.getenv("CHROME_PATH")
+    if chrome_bin:
+        options.binary_location = chrome_bin
+
+    driver = webdriver.Chrome(options=options)
+
+    try:
+        driver.command_executor._client_config.timeout = 300
+    except AttributeError:
+        try:
+            driver.command_executor.set_timeout(300)
+        except Exception:
+            pass
+
+    driver.set_script_timeout(60)
+    driver.set_page_load_timeout(180)
+
+    try:
+        driver.execute_cdp_cmd(
+            "Page.setDownloadBehavior",
+            {"behavior": "allow", "downloadPath": downloads_folder},
+        )
+    except Exception:
+        pass
+
+    driver.implicitly_wait(5)
+    return driver
+
+def do_login(driver: webdriver.Chrome, max_retries: int = 3) -> None:
+    wait = WebDriverWait(driver, 20)
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"[INFO] 로그인 시도 {attempt}/{max_retries}")
+            driver.get(LOGIN_URL)
+
+            id_el = wait.until(EC.presence_of_element_located((By.NAME, "sMemId")))
+            pw_el = wait.until(EC.presence_of_element_located((By.NAME, "sMemPw")))
+
+            for el, val in ((id_el, LOGIN_ID), (pw_el, LOGIN_PW)):
+                try:
+                    el.clear()
+                except Exception:
+                    pass
+                el.send_keys(val)
+            pw_el.send_keys(Keys.RETURN)
+
+            if accept_alert_safe(driver, timeout=3):
+                id_el = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "sMemId")))
+                pw_el = driver.find_element(By.NAME, "sMemPw")
+                id_el.clear()
+                id_el.send_keys(LOGIN_ID)
+                pw_el.clear()
+                pw_el.send_keys(LOGIN_PW)
+                pw_el.send_keys(Keys.RETURN)
+                accept_alert_safe(driver, timeout=2)
+
+            try:
+                wait.until(lambda d: "Login.asp" not in d.current_url)
+            except TimeoutException:
+                btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
+                btn.click()
+                WebDriverWait(driver, 10).until(lambda d: "Login.asp" not in d.current_url)
+
+            print("[INFO] 로그인 성공")
+            return
+
+        except RETRYABLE_ERRORS as e:
+            last_error = e
+            print(f"[WARN] 로그인 시도 {attempt} 실패: {type(e).__name__}: {str(e)[:200]}")
+            if attempt < max_retries:
+                wait_sec = 15 * attempt
+                print(f"[INFO] {wait_sec}초 후 재시도합니다...")
+                time.sleep(wait_sec)
+
+    raise RuntimeError(f"로그인 {max_retries}회 모두 실패. 마지막 에러: {last_error}")
+
+def goto_with_auth(driver: webdriver.Chrome, url: str, login_hint: str = "Login.asp", max_retries: int = 3) -> None:
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"[INFO] 페이지 이동 시도 {attempt}/{max_retries}: {url}")
+            driver.get(url)
+            time.sleep(0.5)
+            if login_hint in driver.current_url:
+                print("[INFO] 로그인 페이지로 리다이렉트됨, 재로그인 진행")
+                do_login(driver)
+                driver.get(url)
+            return
+
+        except RETRYABLE_ERRORS as e:
+            last_error = e
+            print(f"[WARN] 페이지 이동 시도 {attempt} 실패: {type(e).__name__}: {str(e)[:200]}")
+            if attempt < max_retries:
+                wait_sec = 15 * attempt
+                print(f"[INFO] {wait_sec}초 후 재시도합니다...")
+                time.sleep(wait_sec)
+
+    raise RuntimeError(f"페이지 이동 {max_retries}회 모두 실패. 마지막 에러: {last_error}")
+
+def wait_for_download_complete(dirpath: str, timeout: int = 1000) -> None:
+    end = time.time() + timeout
+    pattern_cr = os.path.join(dirpath, "*.crdownload")
+    pattern_csv = os.path.join(dirpath, "*.csv")
+
+    while time.time() < end:
+        if glob.glob(pattern_cr):
+            time.sleep(0.8)
+            continue
+        if glob.glob(pattern_csv):
+            return
+        time.sleep(0.8)
+    raise TimeoutError("다운로드 완료 대기 시간 초과")
+
+def push_df_to_worksheet(spreadsheet, tab_name: str, df_data: pd.DataFrame) -> None:
+    """주어진 탭에 데이터프레임을 씀. 탭 없으면 생성.
+    Clear 없이 덮어쓰기 → 남는 행/열만 나중에 정리 (XLOOKUP 등 참조 중 빈 시트 노출 방지)"""
+    try:
+        ws = spreadsheet.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        print(f"[INFO] 탭 '{tab_name}' 없음 → 새로 생성")
+        ws = spreadsheet.add_worksheet(
+            title=tab_name,
+            rows=max(len(df_data) + 100, 100),
+            cols=max(len(df_data.columns) + 5, 26),
+        )
+
+    old_row_count = ws.row_count
+    old_col_count = ws.col_count
+
+    new_row_count = len(df_data) + 1
+    new_col_count = len(df_data.columns) if len(df_data.columns) > 0 else 1
+
+    if len(df_data) > 0:
+        set_with_dataframe(
+            ws,
+            df_data,
+            include_index=False,
+            include_column_header=True,
+            resize=False,
+        )
+    else:
+        set_with_dataframe(
+            ws,
+            df_data.iloc[0:0],
+            include_index=False,
+            include_column_header=True,
+            resize=False,
+        )
+
+    if old_row_count > new_row_count or old_col_count > new_col_count:
+        try:
+            ws.resize(rows=new_row_count, cols=new_col_count)
+        except Exception as e:
+            print(f"[WARN] 남는 구간 정리 실패 (resize): {e}")
+
+def set_easyui_datebox(driver: webdriver.Chrome, element_id: str, value: str) -> None:
+    """jQuery EasyUI datebox 위젯 값을 내부 상태까지 정확히 세팅."""
+    driver.execute_script(
+        "$(arguments[0]).datebox('setValue', arguments[1]);",
+        f"#{element_id}",
+        value,
+    )
+
+def apply_search_filters(driver: webdriver.Chrome) -> None:
+    """검색조건: 결제일(B) 기준, 시작일/종료일 지정 후 검색 버튼 클릭."""
+    wait = WebDriverWait(driver, 20)
+
+    # 1) 등록일/결제일 select → 결제일(B)
+    ins_date_el = wait.until(EC.presence_of_element_located((By.ID, "shInsDate")))
+    Select(ins_date_el).select_by_value("B")
+    print(f"[INFO] 검색조건: 결제일 기준으로 설정")
+
+    # 2) 시작일 / 종료일 (EasyUI datebox)
+    set_easyui_datebox(driver, "shBeginDay", START_DATE)
+    set_easyui_datebox(driver, "shEndDay", END_DATE)
+    print(f"[INFO] 날짜 범위 설정: {START_DATE} ~ {END_DATE}")
+
+    # 3) 검색 버튼 클릭 (fnPageMv('frmSearch', '1')) → 페이지 리로드
+    search_btn = wait.until(
+        EC.element_to_be_clickable((By.CSS_SELECTOR, "button[onclick*=\"fnPageMv('frmSearch'\"]"))
+    )
+    search_btn.click()
+    print("[INFO] 검색 버튼 클릭")
+
+    # 4) 리로드 완료 대기: shInsDate가 다시 나타나고, 값이 반영될 때까지
+    try:
+        WebDriverWait(driver, 20).until(EC.staleness_of(ins_date_el))
+    except TimeoutException:
+        print("[WARN] staleness 감지 실패, 고정 대기로 대체")
+        time.sleep(2)
+
+    wait.until(EC.presence_of_element_located((By.ID, "shInsDate")))
+    time.sleep(1)  # datebox 위젯 재초기화 대기
+
+# ===== Main =====
+driver = make_driver(headless=True)
+try:
+    do_login(driver)
+    goto_with_auth(driver, PAYMENT_URL)
+
+    apply_search_filters(driver)
+
+    try:
+        print("[INFO] 엑셀 다운로드 버튼 찾는 중...")
+        wait = WebDriverWait(driver, 20)
+        export_btn = wait.until(
+            EC.element_to_be_clickable(
+                (
+                    By.CSS_SELECTOR,
+                    "button[onclick*=\"fnPageExl('Pmt')\"]",
+                )
+            )
+        )
+        print("[INFO] 엑셀 다운로드 버튼 클릭")
+        export_btn.click()
+    except Exception as e:
+        print("[WARN] 버튼 클릭 방식 실패, execute_script로 대체 시도:", e)
+        driver.set_script_timeout(10)
+        driver.execute_script("fnPageExl('Pmt');")
+
+    accept_alert_safe(driver, timeout=5)
+    wait_for_download_complete(downloads_folder, timeout=120)
+
+finally:
+    try:
+        driver.quit()
+    except Exception:
+        pass
+
+csv_files = glob.glob(os.path.join(downloads_folder, "*.csv"))
+if not csv_files:
+    print("❌ CSV 파일이 존재하지 않습니다. (다운로드 실패)")
+    sys.exit(1)
+
+latest_file = max(csv_files, key=os.path.getctime)
+for fp in list(csv_files):
+    if fp != latest_file:
+        try:
+            os.remove(fp)
+            print("🗑 삭제됨:", os.path.basename(fp))
+        except Exception:
+            pass
+
+try:
+    df = pd.read_csv(latest_file, encoding="utf-8-sig", dtype=str, on_bad_lines="skip")
+except Exception:
+    df = pd.read_csv(latest_file, encoding="cp949", dtype=str, on_bad_lines="skip")
+
+print(f"📊 데이터 로딩 완료: {len(df)} rows × {len(df.columns)} cols")
+
+df = df.dropna(how="all").drop_duplicates()
+
+# =====================================================================
+# 📊 Google Sheets 푸시 (결제내역 전용 신규 스프레드시트, DB 업로드 없음)
+# =====================================================================
+print("📊 Google Sheets로 데이터 전송 시작...")
+
+try:
+    creds, _ = google.auth.default(
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+    )
+    gc = gspread.authorize(creds)
+    spreadsheet = gc.open_by_key(GSHEET_ID)
+    print(f"[INFO] 스프레드시트 열기 성공: {spreadsheet.title}")
+
+    push_df_to_worksheet(spreadsheet, GSHEET_WORKSHEET, df)
+    print(f"✅ 결제내역 푸시 완료: {len(df):,}건 → {GSHEET_WORKSHEET}")
+
+except gspread.exceptions.SpreadsheetNotFound:
+    print(f"❌ Spreadsheet를 찾을 수 없음. PAYMENT_GSHEET_ID 또는 공유 권한 확인 필요.")
+    sys.exit(1)
+except gspread.exceptions.APIError as e:
+    print(f"❌ Google Sheets API 에러: {e}")
+    sys.exit(1)
+except Exception as e:
+    import traceback
+    print(f"❌ Google Sheets 전송 실패: {type(e).__name__}: {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
+print("🎉 결제내역 크롤링 -> Sheets 자동화 파이프라인 완료!")

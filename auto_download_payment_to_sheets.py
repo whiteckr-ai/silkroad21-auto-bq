@@ -58,7 +58,8 @@ GSHEET_ID = os.environ["PAYMENT_GSHEET_ID"]
 GSHEET_WORKSHEET = os.getenv("PAYMENT_GSHEET_WORKSHEET") or "결제내역"
 
 # 날짜 범위: 시작일 고정(2026-01-01), 종료일은 실행 시점 기준 오늘
-START_DATE = os.getenv("PAY_START_DATE", "2026-01-01")
+# (os.getenv(...) or 기본값) 형태로, 환경변수가 "빈 문자열"로 존재해도 기본값이 적용되게 처리
+START_DATE = os.getenv("PAY_START_DATE") or "2026-01-01"
 END_DATE = datetime.now().strftime("%Y-%m-%d")
 
 # Download folder

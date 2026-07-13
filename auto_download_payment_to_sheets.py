@@ -291,10 +291,10 @@ def apply_search_filters(driver: webdriver.Chrome) -> None:
     set_easyui_datebox(driver, "shEndDay", END_DATE)
     print(f"[INFO] 날짜 범위 설정: {START_DATE} ~ {END_DATE}")
 
-    # 3) 결제여부 select → 결제완료(Y)
+    # 3) 결제여부 select → 전체 (필터링은 다운로드 후 '상태' 컬럼 기준으로 pandas에서 처리)
     pmt_stat_el = wait.until(EC.presence_of_element_located((By.ID, "shPmtStat")))
-    Select(pmt_stat_el).select_by_value("Y")
-    print("[INFO] 결제여부: 결제완료(Y)로 설정")
+    Select(pmt_stat_el).select_by_value("")
+    print("[INFO] 결제여부: 전체로 설정 (결제완료/부분취소는 다운로드 후 필터링)")
 
     # 4) 검색 버튼 클릭 (fnPageMv('frmSearch', '1')) → 페이지 리로드
     search_btn = wait.until(
@@ -416,6 +416,19 @@ else:
         df = pd.read_csv(latest_file, encoding="cp949", dtype=str, on_bad_lines="skip")
 
 print(f"📊 데이터 로딩 완료: {len(df)} rows × {len(df.columns)} cols")
+
+# '상태' 컬럼 기준으로 결제완료 + 부분취소만 남기고 필터링
+STATUS_COL = "상태"
+INCLUDE_STATUSES = ["결제완료", "부분취소"]
+
+if STATUS_COL in df.columns:
+    before_count = len(df)
+    print(f"[INFO] '{STATUS_COL}' 컬럼 값 분포:")
+    print(df[STATUS_COL].value_counts().to_string())
+    df = df[df[STATUS_COL].isin(INCLUDE_STATUSES)].reset_index(drop=True)
+    print(f"[INFO] 상태 필터링 ({'/'.join(INCLUDE_STATUSES)}): {before_count}건 → {len(df)}건")
+else:
+    print(f"[WARN] '{STATUS_COL}' 컬럼을 찾을 수 없어 필터링을 건너뜀. 실제 컬럼: {list(df.columns)}")
 
 df = df.dropna(how="all").drop_duplicates()
 

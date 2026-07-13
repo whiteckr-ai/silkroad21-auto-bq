@@ -391,7 +391,7 @@ if ext in (".xls", ".xlsx"):
         tables = None
         for enc in ("utf-8", "cp949", "euc-kr"):
             try:
-                tables = pd.read_html(latest_file, encoding=enc)
+                tables = pd.read_html(latest_file, encoding=enc, header=0)
                 print(f"[INFO] read_html 성공 (encoding={enc}), 테이블 {len(tables)}개 발견")
                 break
             except Exception as e2:
@@ -400,6 +400,14 @@ if ext in (".xls", ".xlsx"):
             raise RuntimeError("read_excel과 read_html 모두 실패. 파일 형식 확인 필요.")
         # 여러 테이블이 있으면 행이 가장 많은 것을 데이터 본문으로 간주
         df = max(tables, key=len)
+
+        # 혹시 header=0이 제대로 안 먹어서 컬럼명이 여전히 숫자(0,1,2,...)면
+        # 첫 행을 헤더로 승격
+        if all(str(c).strip().isdigit() for c in df.columns):
+            print("[WARN] 컬럼명이 숫자로 남아있음 → 첫 행을 헤더로 승격")
+            df.columns = df.iloc[0].astype(str)
+            df = df.iloc[1:].reset_index(drop=True)
+
         df = df.astype(str)
 else:
     try:

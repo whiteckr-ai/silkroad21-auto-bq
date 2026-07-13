@@ -45,8 +45,6 @@ jobs:
           LOGIN_ID: ${{ secrets.LOGIN_ID }}
           LOGIN_PW: ${{ secrets.LOGIN_PW }}
           PAYMENT_GSHEET_ID: ${{ secrets.PAYMENT_GSHEET_ID }}
-          PAYMENT_GSHEET_WORKSHEET: ${{ secrets.PAYMENT_GSHEET_WORKSHEET }}
-          PAY_START_DATE: ${{ secrets.PAY_START_DATE }}
         run: python auto_download_payment_to_sheets.py
 
       - name: 로그 업로드 (실패 시 확인용)

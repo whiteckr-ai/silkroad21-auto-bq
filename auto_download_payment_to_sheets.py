@@ -282,7 +282,12 @@ def apply_search_filters(driver: webdriver.Chrome) -> None:
     set_easyui_datebox(driver, "shEndDay", END_DATE)
     print(f"[INFO] 날짜 범위 설정: {START_DATE} ~ {END_DATE}")
 
-    # 3) 검색 버튼 클릭 (fnPageMv('frmSearch', '1')) → 페이지 리로드
+    # 3) 결제여부 select → 결제완료(Y)
+    pmt_stat_el = wait.until(EC.presence_of_element_located((By.ID, "shPmtStat")))
+    Select(pmt_stat_el).select_by_value("Y")
+    print("[INFO] 결제여부: 결제완료(Y)로 설정")
+
+    # 4) 검색 버튼 클릭 (fnPageMv('frmSearch', '1')) → 페이지 리로드
     search_btn = wait.until(
         EC.element_to_be_clickable((By.CSS_SELECTOR, "button[onclick*=\"fnPageMv('frmSearch'\"]"))
     )

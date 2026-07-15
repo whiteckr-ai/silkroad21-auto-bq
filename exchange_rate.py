@@ -10,29 +10,26 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def get_customs_rate(max_retries=3):
-    """
-    공공데이터포털 '관세청_관세환율정보(GW)' API
-    - End Point: https://apis.data.go.kr/1220000/retrieveTrifFxrtInfo
-    - 상세기능: getRetrieveTrifFxrtInfo
-    - 필수 파라미터: serviceKey, aplyBgnDt(YYYYMMDD), weekFxrtTpcd(1:수출, 2:수입)
-    - 데이터 갱신주기: 주 1회 (관세법 제18조 과세환율)
-    """
-    service_key = "2758a1afe287a2143a6893f6a4d637788f34421745d71f6a5ef93d82ae20f114"  # 일반 인증키
+    service_key = "2758a1afe287a2143a6893f6a4d637788f34421745d71f6a5ef93d82ae20f114"
     today = datetime.now().strftime('%Y%m%d')
     url = "https://apis.data.go.kr/1220000/retrieveTrifFxrtInfo/getRetrieveTrifFxrtInfo"
     params = {
         'serviceKey': service_key,
         'aplyBgnDt': today,
-        'weekFxrtTpcd': '2'  # 수입
+        'weekFxrtTpcd': '2'
     }
 
     for attempt in range(1, max_retries + 1):
         try:
             response = requests.get(url, params=params, verify=False, timeout=15)
             response.encoding = 'utf-8'
+
+            # ⭐ 진단용: 실제 응답을 그대로 출력해서 원인을 확인
+            print(f"[디버그] Status: {response.status_code}")
+            print(f"[디버그] Response (첫 500자): {response.text[:500]}")
+
             root = ET.fromstring(response.content)
 
-            # 공통 결과 코드 확인
             result_code = root.findtext('.//resultCode')
             result_msg = root.findtext('.//resultMsg')
 
@@ -42,7 +39,6 @@ def get_customs_rate(max_retries=3):
                     time.sleep(5)
                 continue
 
-            # items > item 목록에서 위안화(CNY) 환율만 추출
             for item in root.findall('.//item'):
                 curr = item.find('currSgn')
                 if curr is not None and curr.text == 'CNY':
@@ -50,9 +46,11 @@ def get_customs_rate(max_retries=3):
                     print(f"✅ 관세청 환율 조회 성공 (시도 {attempt}/{max_retries}): {rate}")
                     return rate
 
-            print(f"⚠️ [시도 {attempt}/{max_retries}] 위안화 환율 데이터를 찾을 수 없습니다. "
-                  f"(주 1회 갱신이라 이번 주 데이터가 아직 없을 수 있음)")
+            print(f"⚠️ [시도 {attempt}/{max_retries}] 위안화 환율 데이터를 찾을 수 없습니다.")
 
+        except ET.ParseError as e:
+            print(f"⚠️ [시도 {attempt}/{max_retries}] XML 파싱 실패: {e}")
+            print(f"[디버그] 원본 응답: {response.text[:500] if 'response' in dir() else '응답 없음'}")
         except Exception as e:
             print(f"⚠️ [시도 {attempt}/{max_retries}] 관세청 API 호출 에러: {e}")
 

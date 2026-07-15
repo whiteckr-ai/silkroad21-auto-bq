@@ -10,14 +10,20 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def get_customs_rate(max_retries=3):
-    # 💡 발급받으신 인증키를 여기에 다시 입력해 주세요
-    api_key = "k250k246v024z146n060b070c0"
+    """
+    공공데이터포털 '관세청_관세환율정보(GW)' API
+    - End Point: https://apis.data.go.kr/1220000/retrieveTrifFxrtInfo
+    - 상세기능: getRetrieveTrifFxrtInfo
+    - 필수 파라미터: serviceKey, aplyBgnDt(YYYYMMDD), weekFxrtTpcd(1:수출, 2:수입)
+    - 데이터 갱신주기: 주 1회 (관세법 제18조 과세환율)
+    """
+    service_key = "2758a1afe287a2143a6893f6a4d637788f34421745d71f6a5ef93d82ae20f114"  # 일반 인증키
     today = datetime.now().strftime('%Y%m%d')
-    url = "https://unipass.customs.go.kr:38010/ext/rest/trifFxrtInfoQry/retrieveTrifFxrtInfo"
+    url = "https://apis.data.go.kr/1220000/retrieveTrifFxrtInfo/getRetrieveTrifFxrtInfo"
     params = {
-        'crkyCn': api_key,
-        'qryYymmDd': today,
-        'imexTp': '2'  # 수입
+        'serviceKey': service_key,
+        'aplyBgnDt': today,
+        'weekFxrtTpcd': '2'  # 수입
     }
 
     for attempt in range(1, max_retries + 1):
@@ -26,15 +32,26 @@ def get_customs_rate(max_retries=3):
             response.encoding = 'utf-8'
             root = ET.fromstring(response.content)
 
-            # XML에서 위안화(CNY) 환율만 추출
-            for item in root.findall('.//trifFxrtInfoQryRsltVo'):
+            # 공통 결과 코드 확인
+            result_code = root.findtext('.//resultCode')
+            result_msg = root.findtext('.//resultMsg')
+
+            if result_code is not None and result_code != '00':
+                print(f"⚠️ [시도 {attempt}/{max_retries}] API 응답 에러: {result_code} - {result_msg}")
+                if attempt < max_retries:
+                    time.sleep(5)
+                continue
+
+            # items > item 목록에서 위안화(CNY) 환율만 추출
+            for item in root.findall('.//item'):
                 curr = item.find('currSgn')
                 if curr is not None and curr.text == 'CNY':
                     rate = item.find('fxrt').text
                     print(f"✅ 관세청 환율 조회 성공 (시도 {attempt}/{max_retries}): {rate}")
                     return rate
 
-            print(f"⚠️ [시도 {attempt}/{max_retries}] 위안화 환율 데이터를 찾을 수 없습니다.")
+            print(f"⚠️ [시도 {attempt}/{max_retries}] 위안화 환율 데이터를 찾을 수 없습니다. "
+                  f"(주 1회 갱신이라 이번 주 데이터가 아직 없을 수 있음)")
 
         except Exception as e:
             print(f"⚠️ [시도 {attempt}/{max_retries}] 관세청 API 호출 에러: {e}")

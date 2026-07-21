@@ -209,8 +209,8 @@ jobs:
         if: ${{ !cancelled() && steps.bq_export.outcome == 'success' }}
         env:
           KDOCS_TOKEN: "1Kg3yPgGLOWMmvuTc6eLdD"
-          KDOCS_TARGET_FILE_ID: "cg6JlPUH5XzC"
-          KDOCS_SCRIPT_NAME: "V2-7ywFu9flguvfUNoAffFcws"
+          KDOCS_TARGET_FILE_ID: "ci9n0X3l4Qe3"
+          KDOCS_SCRIPT_NAME: "V2-7DW86PkDSFvgVJEcK8JWX6"
         run: |
           cp /tmp/export/bq_export.csv result.csv
 

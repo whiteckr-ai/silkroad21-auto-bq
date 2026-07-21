@@ -91,7 +91,7 @@ def send_to_kdocs(cny_rate, krw_rate):
         print("⚠️ KRW 값 없음 — CNY만 전송합니다.")
 
     # raw data 파일의 환율 전용 스크립트로 전송
-    webhook_url = "https://www.kdocs.cn/api/v3/ide/file/541329031118/script/V2-X5RimFUYaSqf8lgfdWIoX/sync_task"
+    webhook_url = "https://www.kdocs.cn/api/v3/ide/file/543983753556/script/V2-L6zmt5bhi7HEpw4dVsMvZ/sync_task"
 
     payload = {
         "Context": {

@@ -67,6 +67,8 @@ jobs:
           GSHEET_ID: ${{ secrets.GSHEET_ID }}
           GSHEET_WORKSHEET: ${{ secrets.GSHEET_WORKSHEET }}
           GSHEET_CUSTOMER_TABS: ${{ secrets.GSHEET_CUSTOMER_TABS }}
+          PACKING_INGEST_URL: ${{ secrets.PACKING_INGEST_URL }}
+          PACKING_INGEST_KEY: ${{ secrets.PACKING_INGEST_KEY }}
         run: python auto_download_headless_log.py
 
       # ===============================================================

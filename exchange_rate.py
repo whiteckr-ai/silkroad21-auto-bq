@@ -117,9 +117,49 @@ def send_to_kdocs(cny_rate, krw_rate):
         print(f"❌ KDocs 연동 에러 발생: {e}")
 
 
+def send_to_packing(cny_rate, krw_rate):
+    # 패킹 서버로 환율 전송
+    #   cny_rate(관세청 CNY 고시환율) → customs
+    #   krw_rate(silkroad21 실크21 환율) → sr
+    #   환경변수 PACKING_RATES_URL, PACKING_INGEST_KEY 필요. 미설정이면 건너뜀.
+    import os
+    packing_url = os.getenv("PACKING_RATES_URL")
+    packing_key = os.getenv("PACKING_INGEST_KEY", "")
+    if not packing_url:
+        print("[INFO] PACKING_RATES_URL 미설정 → 패킹 서버 환율 전송 건너뜀")
+        return
+
+    def _num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    payload = {}
+    c = _num(cny_rate)
+    s = _num(krw_rate)
+    if c is not None:
+        payload["customs"] = c
+    if s is not None:
+        payload["sr"] = s
+    if not payload:
+        print("[INFO] 전송할 환율 값 없음 → 패킹 전송 건너뜀")
+        return
+
+    try:
+        r = requests.post(f"{packing_url}?k={packing_key}", json=payload, timeout=30)
+        if r.status_code == 200:
+            print(f"✅ 패킹 서버 환율 전송 완료: {payload}")
+        else:
+            print(f"❌ 패킹 서버 환율 전송 실패: {r.status_code} - {r.text[:200]}")
+    except Exception as e:
+        print(f"❌ 패킹 서버 환율 전송 오류(무시): {type(e).__name__}: {e}")
+
+
 if __name__ == "__main__":
     print("🔄 관세청 고시환율 및 krw_rate.txt 조회를 시작합니다...")
     cny_rate = get_customs_rate()
     krw_rate = get_krw_rate()
     print(f"수신 결과 -> CNY: {cny_rate}, KRW(krw_rate.txt): {krw_rate}")
     send_to_kdocs(cny_rate, krw_rate)
+    send_to_packing(cny_rate, krw_rate)

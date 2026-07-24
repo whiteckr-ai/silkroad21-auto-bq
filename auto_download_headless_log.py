@@ -515,6 +515,7 @@ try:
             "product": "상품명", "price": "단가", "url": "상품URL",
             "inspect_opt": "구매대행_신청_옵션", "partial_qty": "부분정밀검수_수량",
             "team": "담당팀", "agency": "대행구분",
+            "total_qty": "수량",
         }
         import math as _math
         def _num(v):
@@ -542,6 +543,7 @@ try:
                 "partial_qty": _num(_rd.get(_col["partial_qty"])),
                 "team": str(_rd.get(_col["team"], "") or "").strip(),
                 "agency": str(_rd.get(_col["agency"], "") or "").strip(),
+                "total_qty": _num(_rd.get(_col["total_qty"])),            
             })
         _resp = requests.post(f"{_packing_url}?k={_packing_key}", json={"items": _records}, timeout=120)
         if _resp.status_code == 200:

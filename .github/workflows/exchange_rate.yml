@@ -18,4 +18,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
     - name: 환율 연동 파이썬 스크립트 실행
+      env:
+        PACKING_RATES_URL: ${{ secrets.PACKING_RATES_URL }}
+        PACKING_INGEST_KEY: ${{ secrets.PACKING_INGEST_KEY }}
       run: python exchange_rate.py

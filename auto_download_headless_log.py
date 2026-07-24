@@ -500,3 +500,51 @@ else:
         traceback.print_exc()
 
 print("🎉 크롤링 -> BigQuery -> Sheets(전체+고객사) 자동화 파이프라인 완료!")
+
+
+# =====================================================================
+# 📦 [추가] 패킹 서버로 item_master 전송 (기존 로직 뒤, 실패해도 영향 없음)
+# =====================================================================
+try:
+    _packing_url = os.getenv("PACKING_INGEST_URL")
+    _packing_key = os.getenv("PACKING_INGEST_KEY", "")
+    if _packing_url:
+        print("📦 패킹 서버로 item_master 전송 시작...")
+        _col = {
+            "item_no": "아이템번호", "member_name": "회원명", "member_id": "회원고유번호",
+            "product": "상품명", "price": "단가", "url": "상품URL",
+            "inspect_opt": "구매대행_신청_옵션", "partial_qty": "부분정밀검수_수량",
+            "team": "담당팀", "agency": "대행구분",
+        }
+        def _num(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0
+        _records = []
+        for _, _r in df_bq.iterrows():
+            _rd = _r.to_dict()
+            _ino = str(_rd.get(_col["item_no"], "")).strip()
+            if not _ino or _ino == "nan":
+                continue
+            _records.append({
+                "item_no": _ino,
+                "member_name": str(_rd.get(_col["member_name"], "") or "").strip(),
+                "member_id": str(_rd.get(_col["member_id"], "") or "").strip(),
+                "product": str(_rd.get(_col["product"], "") or "").strip(),
+                "price": _num(_rd.get(_col["price"])),
+                "url": str(_rd.get(_col["url"], "") or "").strip(),
+                "inspect_opt": str(_rd.get(_col["inspect_opt"], "") or "").replace("\t", " ").strip(),
+                "partial_qty": _num(_rd.get(_col["partial_qty"])),
+                "team": str(_rd.get(_col["team"], "") or "").strip(),
+                "agency": str(_rd.get(_col["agency"], "") or "").strip(),
+            })
+        _resp = requests.post(f"{_packing_url}?k={_packing_key}", json={"items": _records}, timeout=120)
+        if _resp.status_code == 200:
+            print(f"✅ 패킹 서버 전송 완료: {_resp.json()}")
+        else:
+            print(f"❌ 패킹 서버 전송 실패: {_resp.status_code} {_resp.text[:200]}")
+    else:
+        print("[INFO] PACKING_INGEST_URL 미설정 → 패킹 전송 건너뜀")
+except Exception as _e:
+    print(f"❌ 패킹 서버 전송 중 오류(무시): {type(_e).__name__}: {_e}")

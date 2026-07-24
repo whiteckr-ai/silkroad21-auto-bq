@@ -516,9 +516,13 @@ try:
             "inspect_opt": "구매대행_신청_옵션", "partial_qty": "부분정밀검수_수량",
             "team": "담당팀", "agency": "대행구분",
         }
+        import math as _math
         def _num(v):
             try:
-                return float(v)
+                f = float(v)
+                if _math.isnan(f) or _math.isinf(f):
+                    return 0
+                return f
             except (TypeError, ValueError):
                 return 0
         _records = []

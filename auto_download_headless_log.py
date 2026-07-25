@@ -517,6 +517,7 @@ try:
             "team": "담당팀", "agency": "대행구분",
             "total_qty": "수량",
             "order_status": "주문상태",          
+            "buy_rate": "환율",
         }
         import math as _math
         def _num(v):
@@ -546,6 +547,7 @@ try:
                 "agency": str(_rd.get(_col["agency"], "") or "").strip(),
                 "total_qty": _num(_rd.get(_col["total_qty"])),
                 "order_status": str(_rd.get(_col["order_status"], "") or "").strip(),
+                "buy_rate": _num(_rd.get(_col["buy_rate"])),
             })
         _resp = requests.post(f"{_packing_url}?k={_packing_key}", json={"items": _records}, timeout=120)
         if _resp.status_code == 200:

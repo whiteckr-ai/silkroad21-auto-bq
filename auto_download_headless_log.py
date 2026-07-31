@@ -521,6 +521,7 @@ try:
             "color": "색상",
             "name_en": "통관품목",
             "arrival_date": "도착일",
+            "inspect_date": "검품완료일",
         }
         import math as _math
         def _num(v):
@@ -554,6 +555,7 @@ try:
                 "color": str(_rd.get(_col["color"], "") or "").strip(),
                 "name_en": str(_rd.get(_col["name_en"], "") or "").strip(),
                 "arrival_date": str(_rd.get(_col["arrival_date"], "") or "").strip(),
+                "inspect_date": str(_rd.get(_col["inspect_date"], "") or "").strip(),
             })
         _resp = requests.post(f"{_packing_url}?k={_packing_key}", json={"items": _records}, timeout=120)
         if _resp.status_code == 200:

@@ -6,6 +6,7 @@ import sys
 import time
 import glob
 import re
+import unicodedata
 from pathlib import Path
 import pandas as pd
 from selenium import webdriver
@@ -525,6 +526,23 @@ try:
             "arrival_date": "도착일",
             "inspect_date": "검품완료일",
         }
+        def _header_key(value):
+            """CSV 헤더의 BOM·개행·공백·구분자 차이를 제거해 같은 컬럼을 찾는다."""
+            text = unicodedata.normalize("NFKC", str(value or ""))
+            text = text.replace("\ufeff", "").replace("\u200b", "")
+            return re.sub(r"[\s_\-]+", "", text).lower()
+
+        def _resolve_header(*candidates):
+            by_key = {_header_key(col): col for col in df_bq.columns}
+            for candidate in candidates:
+                actual = by_key.get(_header_key(candidate))
+                if actual is not None:
+                    return actual
+            return ""
+
+        # 다운로드 사이트의 헤더에 숨은 개행/공백이 붙어도 실사주소가 누락되지 않게 한다.
+        _col["thumbnail_url"] = _resolve_header("이미지URL", "이미지주소", "썸네일URL")
+        _col["inspection_url"] = _resolve_header("실사주소", "실사URL", "실사이미지URL")
         import math as _math
         def _num(v):
             try:
@@ -546,16 +564,34 @@ try:
             s = str(v).strip()
             return "" if s.lower() in ("nan", "none", "nat") else s
 
-        if _col["thumbnail_url"] not in df_bq.columns:
+        def _url_text(v):
+            """일반 URL뿐 아니라 HTML 링크/엑셀 HYPERLINK 형태도 실제 주소로 정규화한다."""
+            s = _text(v)
+            if not s:
+                return ""
+            html_match = re.search(r"""href\s*=\s*["']([^"']+)["']""", s, re.I)
+            if html_match:
+                return html_match.group(1).strip()
+            formula_match = re.search(r"""HYPERLINK\s*\(\s*["']([^"']+)["']""", s, re.I)
+            if formula_match:
+                return formula_match.group(1).strip()
+            return s
+
+        if not _col["thumbnail_url"]:
             print(
-                f"⚠️ 썸네일 컬럼 '{_col['thumbnail_url']}' 없음 "
+                "⚠️ 썸네일 컬럼 '이미지URL' 없음 "
                 "→ thumbnail_url은 빈 값으로 전송합니다."
             )
-        if _col["inspection_url"] not in df_bq.columns:
+        else:
+            print(f"[INFO] 썸네일 원본 컬럼 확인: {_col['thumbnail_url']!r}")
+        if not _col["inspection_url"]:
+            similar = [col for col in df_bq.columns if "실사" in str(col)]
             print(
-                f"⚠️ 실사 컬럼 '{_col['inspection_url']}' 없음 "
-                "→ inspection_url은 빈 값으로 전송합니다."
+                "⚠️ 실사 컬럼 '실사주소' 없음 "
+                f"(실사 포함 헤더: {similar}) → inspection_url은 빈 값으로 전송합니다."
             )
+        else:
+            print(f"[INFO] 실사 원본 컬럼 확인: {_col['inspection_url']!r}")
 
         _records = []
         for _, _r in df_bq.iterrows():
@@ -570,8 +606,8 @@ try:
                 "product": _text(_rd.get(_col["product"], "")),
                 "price": _num(_rd.get(_col["price"])),
                 "url": _text(_rd.get(_col["url"], "")),
-                "thumbnail_url": _text(_rd.get(_col["thumbnail_url"], "")),
-                "inspection_url": _text(_rd.get(_col["inspection_url"], "")),
+                "thumbnail_url": _url_text(_rd.get(_col["thumbnail_url"], "")),
+                "inspection_url": _url_text(_rd.get(_col["inspection_url"], "")),
                 "inspect_opt": _text(_rd.get(_col["inspect_opt"], "")).replace("\t", " "),
                 "partial_qty": _num(_rd.get(_col["partial_qty"])),
                 "team": _text(_rd.get(_col["team"], "")),

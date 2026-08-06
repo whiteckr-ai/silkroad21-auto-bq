@@ -514,6 +514,7 @@ try:
             "item_no": "아이템번호", "member_name": "회원명", "member_id": "회원고유번호",
             "product": "상품명", "price": "단가", "url": "상품URL",
             "thumbnail_url": "이미지URL",
+            "inspection_url": "실사주소",
             "inspect_opt": "구매대행_신청_옵션", "partial_qty": "부분정밀검수_수량",
             "team": "담당팀", "agency": "대행구분",
             "total_qty": "수량",
@@ -550,6 +551,11 @@ try:
                 f"⚠️ 썸네일 컬럼 '{_col['thumbnail_url']}' 없음 "
                 "→ thumbnail_url은 빈 값으로 전송합니다."
             )
+        if _col["inspection_url"] not in df_bq.columns:
+            print(
+                f"⚠️ 실사 컬럼 '{_col['inspection_url']}' 없음 "
+                "→ inspection_url은 빈 값으로 전송합니다."
+            )
 
         _records = []
         for _, _r in df_bq.iterrows():
@@ -565,6 +571,7 @@ try:
                 "price": _num(_rd.get(_col["price"])),
                 "url": _text(_rd.get(_col["url"], "")),
                 "thumbnail_url": _text(_rd.get(_col["thumbnail_url"], "")),
+                "inspection_url": _text(_rd.get(_col["inspection_url"], "")),
                 "inspect_opt": _text(_rd.get(_col["inspect_opt"], "")).replace("\t", " "),
                 "partial_qty": _num(_rd.get(_col["partial_qty"])),
                 "team": _text(_rd.get(_col["team"], "")),
@@ -578,7 +585,9 @@ try:
                 "inspect_date": _text(_rd.get(_col["inspect_date"], "")),
             })
         _thumb_count = sum(1 for _rec in _records if _rec.get("thumbnail_url"))
+        _inspection_count = sum(1 for _rec in _records if _rec.get("inspection_url"))
         print(f"[INFO] 썸네일 URL 포함: {_thumb_count:,}/{len(_records):,}건")
+        print(f"[INFO] 실사주소 포함: {_inspection_count:,}/{len(_records):,}건")
         _resp = requests.post(f"{_packing_url}?k={_packing_key}", json={"items": _records}, timeout=120)
         if _resp.status_code == 200:
             print(f"✅ 패킹 서버 전송 완료: {_resp.json()}")

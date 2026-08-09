@@ -633,3 +633,76 @@ try:
         print("[INFO] PACKING_INGEST_URL 미설정 → 패킹 전송 건너뜀")
 except Exception as _e:
     print(f"❌ 패킹 서버 전송 중 오류(무시): {type(_e).__name__}: {_e}")
+
+
+# =====================================================================
+# 📦 [추가] 재무회계 ERP로 담당자 작업기록 전송 (근태 교차확인용)
+# =====================================================================
+try:
+    _fin_url = os.getenv("FINANCE_INGEST_URL")            # 예: http://<서버IP>:8080/api/packing/ingest
+    _fin_key = os.getenv("FINANCE_INGEST_KEY", "")        # 서버 PACKING_INGEST_KEY와 동일(안 쓰면 빈값)
+    _fin_user = os.getenv("FINANCE_BASIC_USER", "")       # Nginx Basic 인증(직원 접속 계정)
+    _fin_pass = os.getenv("FINANCE_BASIC_PASS", "")
+    if _fin_url:
+        print("📦 재무 ERP로 담당자 작업기록 전송 시작...")
+
+        def _fin_key_norm(value):
+            text = unicodedata.normalize("NFKC", str(value or ""))
+            text = text.replace("﻿", "").replace("​", "")
+            return re.sub(r"[\s_\-]+", "", text).lower()
+
+        def _fin_col(*candidates):
+            by_key = {_fin_key_norm(col): col for col in df_bq.columns}
+            for cand in candidates:
+                actual = by_key.get(_fin_key_norm(cand))
+                if actual is not None:
+                    return actual
+            return ""
+
+        def _fin_text(v):
+            if v is None:
+                return ""
+            try:
+                if pd.isna(v):
+                    return ""
+            except (TypeError, ValueError):
+                pass
+            s = str(v).strip()
+            return "" if s.lower() in ("nan", "none", "nat") else s
+
+        _c_ap  = _fin_col("담당자1")
+        _c_apd = _fin_col("승인일")
+        _c_ar  = _fin_col("담당자2")
+        _c_ard = _fin_col("도착일")
+        if not (_c_ap and _c_ar):
+            print(f"⚠️ 담당자 컬럼 없음 (담당자1={_c_ap!r}, 담당자2={_c_ar!r}) → 재무 전송 건너뜀")
+        else:
+            _fin_items = []
+            for _, _r in df_bq.iterrows():
+                _rd = _r.to_dict()
+                _ap = _fin_text(_rd.get(_c_ap, ""))
+                _ar = _fin_text(_rd.get(_c_ar, ""))
+                if not _ap and not _ar:
+                    continue  # 담당자 없는 행(아직 작업 안 된 아이템)은 건너뜀
+                _fin_items.append({
+                    "approver":     _ap,
+                    "approve_date": _fin_text(_rd.get(_c_apd, "")),
+                    "arriver":      _ar,
+                    "arrive_date":  _fin_text(_rd.get(_c_ard, "")),
+                })
+            print(f"[INFO] 재무 전송 아이템: {len(_fin_items):,}건")
+            _auth = (_fin_user, _fin_pass) if _fin_user else None
+            _fin_resp = requests.post(
+                f"{_fin_url}?k={_fin_key}",
+                json={"items": _fin_items},
+                auth=_auth,
+                timeout=120,
+            )
+            if _fin_resp.status_code == 200:
+                print(f"✅ 재무 ERP 전송 완료: {_fin_resp.json()}")
+            else:
+                print(f"❌ 재무 ERP 전송 실패: {_fin_resp.status_code} {_fin_resp.text[:200]}")
+    else:
+        print("[INFO] FINANCE_INGEST_URL 미설정 → 재무 전송 건너뜀")
+except Exception as _e:
+    print(f"❌ 재무 ERP 전송 중 오류(무시): {type(_e).__name__}: {_e}")

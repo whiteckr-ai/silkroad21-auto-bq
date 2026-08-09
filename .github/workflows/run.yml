@@ -69,6 +69,9 @@ jobs:
           GSHEET_CUSTOMER_TABS: ${{ secrets.GSHEET_CUSTOMER_TABS }}
           PACKING_INGEST_URL: ${{ secrets.PACKING_INGEST_URL }}
           PACKING_INGEST_KEY: ${{ secrets.PACKING_INGEST_KEY }}
+          FINANCE_INGEST_URL: ${{ secrets.FINANCE_INGEST_URL }}
+          FINANCE_BASIC_USER: ${{ secrets.FINANCE_BASIC_USER }}
+          FINANCE_BASIC_PASS: ${{ secrets.FINANCE_BASIC_PASS }}
         run: python auto_download_headless_log.py
 
       # ===============================================================

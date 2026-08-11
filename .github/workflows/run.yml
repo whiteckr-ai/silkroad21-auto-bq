@@ -72,6 +72,8 @@ jobs:
           FINANCE_INGEST_URL: ${{ secrets.FINANCE_INGEST_URL }}
           FINANCE_BASIC_USER: ${{ secrets.FINANCE_BASIC_USER }}
           FINANCE_BASIC_PASS: ${{ secrets.FINANCE_BASIC_PASS }}
+          FINANCE_RAWDATA_URL: ${{ secrets.FINANCE_RAWDATA_URL }}   # http://<서버IP>:8080/api/rawdata/ingest
+          FINANCE_RAWDATA_KEY: ${{ secrets.FINANCE_RAWDATA_KEY }}   # 선택: 서버 RAWDATA_INGEST_KEY
         run: python auto_download_headless_log.py
 
       # ===============================================================

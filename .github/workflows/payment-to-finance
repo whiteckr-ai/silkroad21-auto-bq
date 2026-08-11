@@ -1,0 +1,66 @@
+name: payment-to-finance
+
+# =====================================================================
+# 결제내역 · 예치금 크롤링 → 재무회계 ERP 직접 전송
+#   구버전(payment-to-sheets, Google Sheets 업로드)을 대체. 재무 ERP로만 쏜다.
+#   트리거: cron-job.org 외부 스케줄러가 workflow_dispatch API를 호출(하루 1회 권장).
+#   (재무 앱은 하루 1번 갱신이면 충분. 더 자주 원하면 스케줄러 주기만 바꾸면 됨.)
+# =====================================================================
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: payment-to-finance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install selenium requests urllib3
+
+      - name: 결제내역·예치금 크롤링 → 재무 ERP 전송
+        env:
+          LOGIN_ID: ${{ secrets.LOGIN_ID }}
+          LOGIN_PW: ${{ secrets.LOGIN_PW }}
+          FINANCE_PAYMENT_URL: ${{ secrets.FINANCE_PAYMENT_URL }}   # http://<서버IP>:8080/api/payment/ingest
+          FINANCE_PAYMENT_KEY: ${{ secrets.FINANCE_PAYMENT_KEY }}   # 선택: 서버 PAYMENT_INGEST_KEY
+          FINANCE_BASIC_USER: ${{ secrets.FINANCE_BASIC_USER }}     # Nginx Basic 인증(직원 접속 계정)
+          FINANCE_BASIC_PASS: ${{ secrets.FINANCE_BASIC_PASS }}
+          # 예치금 페이지 URL이 기본값과 다르면 아래 시크릿으로 덮어씀(없으면 코드 기본값 사용)
+          PAYMENT_DEPOSIT_URL: ${{ secrets.PAYMENT_DEPOSIT_URL }}
+          # PAY_START_DATE: "2026-01-01"   # 필요 시 시작일 조정
+        run: python auto_download_payment.py
+
+      - name: 로그 업로드 (실패 시 확인용)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: payment-log
+          path: log_payment.txt
+          retention-days: 7
+
+      - name: 디버그 스크린샷/다운로드폴더 업로드 (실패 시 확인용)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: payment-debug
+          path: downloads_payment/
+          retention-days: 7
+          if-no-files-found: ignore

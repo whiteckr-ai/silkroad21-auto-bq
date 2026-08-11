@@ -196,9 +196,9 @@ def wait_for_data(driver: webdriver.Chrome, timeout: int = 40) -> None:
     time.sleep(2)  # 버튼 hydration 여유
 
 
-def verify_company(driver: webdriver.Chrome) -> None:
+def verify_company(driver: webdriver.Chrome) -> bool:
     """좌상단 워크스페이스가 COMPANY_NAME인지 확인하고, 다르면 전환한다(계정에 회사 2개).
-    로그인 기본값이 보통 맞으므로 대개 확인만 하고 넘어간다."""
+    전환했으면 True(호출부가 통장내역으로 재진입해야 함 — 전환 시 홈으로 튕긴다), 이미 맞으면 False."""
     wait = WebDriverWait(driver, 20)
     switcher = wait.until(
         EC.presence_of_element_located(
@@ -207,7 +207,7 @@ def verify_company(driver: webdriver.Chrome) -> None:
     )
     if COMPANY_NAME in (switcher.text or ""):
         print(f"[INFO] 회사 확인 OK: {COMPANY_NAME} (전환 불필요)")
-        return
+        return False
     print(f"[INFO] 현재 회사가 '{COMPANY_NAME}' 아님(현재: {switcher.text!r}) → 전환 시도")
     dismiss_modals(driver)
     driver.execute_script("arguments[0].click();", switcher)  # 가로채임 우회: JS 클릭
@@ -220,6 +220,14 @@ def verify_company(driver: webdriver.Chrome) -> None:
     time.sleep(3)
     if COMPANY_NAME not in driver.page_source:
         raise RuntimeError(f"회사 '{COMPANY_NAME}' 전환 확인 실패 — 다른 회사 데이터를 받을 위험")
+    return True
+
+
+def go_to_transactions(driver: webdriver.Chrome) -> None:
+    """통장내역 페이지로 들어가 모달 닫고 실데이터(합계 푸터) 로드를 기다린다."""
+    driver.get(TRANSACTIONS_URL)
+    dismiss_modals(driver)
+    wait_for_data(driver)
 
 
 def wait_for_download_complete(timeout: int = 180) -> str:
@@ -309,11 +317,9 @@ def main() -> None:
     try:
         do_login(driver)
         # 홈의 안내 모달을 피하려 통장내역으로 직행(회사 선택기는 상단바라 여기서도 됨).
-        driver.get(TRANSACTIONS_URL)
-        dismiss_modals(driver)
-        wait_for_data(driver)
-        verify_company(driver)
-        wait_for_data(driver)  # 전환했을 수 있으니 데이터 재확인
+        go_to_transactions(driver)
+        if verify_company(driver):     # 회사가 틀려 전환했으면 홈으로 튕기므로
+            go_to_transactions(driver)  # 통장내역으로 재진입(에스앤피그룹 데이터)
         path = download_transactions(driver)
         post_to_finance(path)
         print("\n🎉 완료 — 통장 내역 전송 성공")

@@ -706,3 +706,96 @@ try:
         print("[INFO] FINANCE_INGEST_URL 미설정 → 재무 전송 건너뜀")
 except Exception as _e:
     print(f"❌ 재무 ERP 전송 중 오류(무시): {type(_e).__name__}: {_e}")
+
+
+# =====================================================================
+# 📦 [추가] 재무회계 ERP로 raw data 전체 전송 (금액대조·송금이익 + 근태)
+#   위 packing/finance 블록과 별개. 금액·환율 포함 전체 행을 보낸다(같은 30분 주기).
+#   서버가 rawitem(금액) + packing(근태)을 둘 다 만든다. try/except라 재무 서버 문제가
+#   패킹 파이프라인에 영향 없음(엔드포인트 완전 분리).
+# =====================================================================
+try:
+    _rd_url = os.getenv("FINANCE_RAWDATA_URL")           # 예: http://<서버IP>:8080/api/rawdata/ingest
+    _rd_key = os.getenv("FINANCE_RAWDATA_KEY", "")       # 서버 RAWDATA_INGEST_KEY와 동일(안 쓰면 빈값)
+    _rd_user = os.getenv("FINANCE_BASIC_USER", "")       # Nginx Basic 인증(패킹 블록과 동일 계정)
+    _rd_pass = os.getenv("FINANCE_BASIC_PASS", "")
+    if _rd_url:
+        print("📦 재무 ERP로 raw data 전체 전송 시작...")
+
+        def _rd_norm(value):
+            text = unicodedata.normalize("NFKC", str(value or ""))
+            text = text.replace("﻿", "").replace("​", "")
+            return re.sub(r"[\s_\-]+", "", text).lower()
+
+        def _rd_col(*candidates):
+            by_key = {_rd_norm(col): col for col in df_bq.columns}
+            for cand in candidates:
+                actual = by_key.get(_rd_norm(cand))
+                if actual is not None:
+                    return actual
+            return ""
+
+        def _rd_text(v):
+            if v is None:
+                return ""
+            try:
+                if pd.isna(v):
+                    return ""
+            except (TypeError, ValueError):
+                pass
+            s = str(v).strip()
+            return "" if s.lower() in ("nan", "none", "nat") else s
+
+        _c_item = _rd_col("아이템번호")
+        _c_tot  = _rd_col("합계_원화_", "합계원화", "합계(원화)")
+        _c_unit = _rd_col("단가_원화_", "단가원화", "단가(원화)")
+        _c_qty  = _rd_col("최초_주문수량", "최초주문수량")   # ⚠️ 첫 실행 후 금액대조 빵꾸 수로 정상 여부 확인
+        _c_fee  = _rd_col("수수료_원화_", "수수료원화", "수수료(원화)")
+        _c_ship = _rd_col("현지배송비_원화_", "현지배송비원화", "현지배송비(원화)")
+        _c_etc  = _rd_col("기타금액_원화_", "기타금액원화", "기타금액(원화)")
+        _c_stat = _rd_col("주문상태")
+        _c_fx   = _rd_col("환율")
+        _c_ap   = _rd_col("담당자1")
+        _c_apd  = _rd_col("승인일")
+        _c_ar   = _rd_col("담당자2")
+        _c_ard  = _rd_col("도착일")
+        if not _c_item:
+            print("⚠️ 아이템번호 컬럼 없음 → raw data 전송 건너뜀")
+        else:
+            _rd_rows = []
+            for _, _r in df_bq.iterrows():
+                _rd = _r.to_dict()
+                _no = _rd_text(_rd.get(_c_item, ""))
+                if not _no:
+                    continue
+                _rd_rows.append({
+                    "item_no":      _no,
+                    "total_krw":    _rd_text(_rd.get(_c_tot, "")),
+                    "unit_krw":     _rd_text(_rd.get(_c_unit, "")),
+                    "init_qty":     _rd_text(_rd.get(_c_qty, "")),
+                    "fee_krw":      _rd_text(_rd.get(_c_fee, "")),
+                    "ship_krw":     _rd_text(_rd.get(_c_ship, "")),
+                    "etc_krw":      _rd_text(_rd.get(_c_etc, "")),
+                    "status":       _rd_text(_rd.get(_c_stat, "")),
+                    "fx":           _rd_text(_rd.get(_c_fx, "")),
+                    "approver":     _rd_text(_rd.get(_c_ap, "")),
+                    "approve_date": _rd_text(_rd.get(_c_apd, "")),
+                    "arriver":      _rd_text(_rd.get(_c_ar, "")),
+                    "arrive_date":  _rd_text(_rd.get(_c_ard, "")),
+                })
+            print(f"[INFO] raw data 전송 행: {len(_rd_rows):,}건")
+            _rd_auth = (_rd_user, _rd_pass) if _rd_user else None
+            _rd_resp = requests.post(
+                f"{_rd_url}?k={_rd_key}",
+                json={"rows": _rd_rows},   # mode 생략 = full(rawitem + packing 둘 다)
+                auth=_rd_auth,
+                timeout=120,
+            )
+            if _rd_resp.status_code == 200:
+                print(f"✅ 재무 raw data 전송 완료: {_rd_resp.json()}")
+            else:
+                print(f"❌ 재무 raw data 전송 실패: {_rd_resp.status_code} {_rd_resp.text[:200]}")
+    else:
+        print("[INFO] FINANCE_RAWDATA_URL 미설정 → raw data 전송 건너뜀")
+except Exception as _e:
+    print(f"❌ 재무 raw data 전송 중 오류(무시): {type(_e).__name__}: {_e}")

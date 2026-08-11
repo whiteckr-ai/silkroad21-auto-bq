@@ -68,9 +68,10 @@ RUNNER = os.getenv("GITHUB_ACTIONS") == "true"
 LOGIN_ID = os.environ["CLOBE_LOGIN_ID"]     # 클로브 이메일
 LOGIN_PW = os.environ["CLOBE_LOGIN_PW"]     # 클로브 비번
 
-# 로그인 후 반드시 이 회사(워크스페이스)로 전환한다. 계정에 회사가 2개라 안 고르면
-# 엉뚱한 데이터를 받는다. 이름 일부만 맞으면 됨(부분 일치).
-COMPANY_NAME = os.getenv("CLOBE_COMPANY_NAME", "에스앤피그룹")
+# 로그인 후 반드시 이 회사(워크스페이스)여야 한다. 계정에 회사가 2개라 다르면 엉뚱한 데이터를 받는다.
+# ⚠️ os.getenv(key, default)는 yml이 빈 문자열을 넘기면(시크릿 미설정) default 대신 ""를 준다.
+#    → `or`로 빈값도 기본값으로 떨어지게 한다(payment 예치금 URL과 같은 함정).
+COMPANY_NAME = os.getenv("CLOBE_COMPANY_NAME") or "에스앤피그룹"
 
 # 재무 ERP 수신 (필수)
 FIN_URL = os.environ["FINANCE_BANK_URL"]         # 예: http://<서버IP>:8080/api/bank/ingest
@@ -100,6 +101,10 @@ def make_driver(headless: bool = True) -> webdriver.Chrome:
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1400,1000")
     options.add_argument("--remote-allow-origins=*")
+    # 자동화 탐지 회피(일부 SPA가 headless/webdriver면 export를 막음)
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
     options.add_experimental_option(
         "prefs",
         {
@@ -157,33 +162,65 @@ def do_login(driver: webdriver.Chrome, max_retries: int = 3) -> None:
     raise RuntimeError(f"로그인 {max_retries}회 모두 실패. 마지막 에러: {last_error}")
 
 
-def select_company(driver: webdriver.Chrome) -> None:
-    """좌상단 워크스페이스 선택기를 열어 COMPANY_NAME 회사로 전환.
-    이미 그 회사면 그대로 둔다. 계정에 회사가 2개라 이 단계가 필수."""
+def dismiss_modals(driver: webdriver.Chrome) -> None:
+    """로그인 직후 뜨는 안내 팝업(예: '서비스 개선 안내')을 닫는다. 클릭을 가로채므로 필수.
+    ESC + 닫기(X) 버튼을 관대하게 시도한다(없으면 조용히 통과)."""
+    for _ in range(3):
+        closed = False
+        try:
+            driver.switch_to.active_element.send_keys(Keys.ESCAPE)
+        except Exception:
+            pass
+        for xp in (
+            "//button[@aria-label='닫기' or @aria-label='Close']",
+            "//div[@role='dialog']//button[contains(.,'닫기')]",
+        ):
+            try:
+                for el in driver.find_elements(By.XPATH, xp):
+                    if el.is_displayed():
+                        driver.execute_script("arguments[0].click();", el)
+                        closed = True
+                        time.sleep(0.4)
+            except Exception:
+                pass
+        if not closed:
+            break
+        time.sleep(0.4)
+
+
+def wait_for_data(driver: webdriver.Chrome, timeout: int = 40) -> None:
+    """통장내역 표의 실데이터 로드를 기다린다. 사이드바 '통장 내역' 글자는 항상 있으니 쓰면 안 되고,
+    데이터가 있어야만 뜨는 푸터 '합계'(입금액 합계/출금액 합계)를 기다린다."""
+    WebDriverWait(driver, timeout).until(
+        EC.presence_of_element_located((By.XPATH, "//*[contains(text(),'합계')]"))
+    )
+    time.sleep(2)  # 버튼 hydration 여유
+
+
+def verify_company(driver: webdriver.Chrome) -> None:
+    """좌상단 워크스페이스가 COMPANY_NAME인지 확인하고, 다르면 전환한다(계정에 회사 2개).
+    로그인 기본값이 보통 맞으므로 대개 확인만 하고 넘어간다."""
     wait = WebDriverWait(driver, 20)
-    # 이미 헤더에 회사명이 보이면 전환 불필요일 수 있으나, 확실히 하려고 항상 시도한다.
-    try:
-        # 좌상단 워크스페이스 드롭다운(회사명이 들어간 버튼)을 연다.
-        switcher = wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH, "//button[.//*[contains(text(),'주식회사') or contains(text(),'그룹')]]")
-            )
+    switcher = wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//button[.//*[contains(text(),'주식회사') or contains(text(),'그룹')]]")
         )
-        switcher.click()
-        time.sleep(1)
-        # 드롭다운에서 COMPANY_NAME 항목 클릭
-        target = wait.until(
-            EC.element_to_be_clickable((By.XPATH, f"//*[contains(text(),'{COMPANY_NAME}')]"))
-        )
-        target.click()
-        print(f"[INFO] 회사 전환: {COMPANY_NAME}")
-        time.sleep(2)
-    except Exception as e:
-        # 이미 그 회사가 선택돼 있거나 UI가 달라졌을 수 있다. 헤더에 회사명이 있으면 통과.
-        print(f"[WARN] 회사 선택기 조작 실패({type(e).__name__}: {str(e)[:150]}). "
-              f"현재 화면에 '{COMPANY_NAME}' 있는지 확인.")
-        if COMPANY_NAME not in driver.page_source:
-            raise RuntimeError(f"회사 '{COMPANY_NAME}' 전환 확인 실패 — 다른 회사 데이터를 받을 위험")
+    )
+    if COMPANY_NAME in (switcher.text or ""):
+        print(f"[INFO] 회사 확인 OK: {COMPANY_NAME} (전환 불필요)")
+        return
+    print(f"[INFO] 현재 회사가 '{COMPANY_NAME}' 아님(현재: {switcher.text!r}) → 전환 시도")
+    dismiss_modals(driver)
+    driver.execute_script("arguments[0].click();", switcher)  # 가로채임 우회: JS 클릭
+    time.sleep(1)
+    target = wait.until(
+        EC.element_to_be_clickable((By.XPATH, f"//*[contains(text(),'{COMPANY_NAME}')]"))
+    )
+    driver.execute_script("arguments[0].click();", target)
+    print(f"[INFO] 회사 전환: {COMPANY_NAME}")
+    time.sleep(3)
+    if COMPANY_NAME not in driver.page_source:
+        raise RuntimeError(f"회사 '{COMPANY_NAME}' 전환 확인 실패 — 다른 회사 데이터를 받을 위험")
 
 
 def wait_for_download_complete(timeout: int = 180) -> str:
@@ -212,15 +249,10 @@ def clear_downloads() -> None:
 
 
 def download_transactions(driver: webdriver.Chrome) -> str:
-    """통장 내역 화면 → 「엑셀 다운로드」 클릭 → 파일 경로 반환.
-    「위하고 업로드용 엑셀 다운로드」가 아니라 순수 「엑셀 다운로드」를 눌러야
-    시트 「통합 라벨링 내역」이 들어온 파일이 온다(parseBankTx가 읽는 포맷)."""
+    """「엑셀 다운로드」 클릭 → 파일 경로 반환. (통장내역 페이지·데이터 로드는 호출 전에 끝나 있어야 함.)
+    「위하고 업로드용」이 아니라 순수 「엑셀 다운로드」를 눌러야 시트 「통합 라벨링 내역」 파일이 온다."""
     wait = WebDriverWait(driver, 30)
     clear_downloads()
-    driver.get(TRANSACTIONS_URL)
-    # 표(그리드)가 로드될 때까지 대기 = 데이터 준비됨
-    wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(),'통장 내역')]")))
-    time.sleep(3)  # 데이터/버튼 hydration
 
     # 「엑셀 다운로드」 버튼 — '위하고'가 들어간 버튼은 제외.
     btn = wait.until(
@@ -229,13 +261,16 @@ def download_transactions(driver: webdriver.Chrome) -> str:
         )
     )
     print("[INFO] 「엑셀 다운로드」 클릭")
-    btn.click()
-
-    # 다운로드 옵션 모달/확인이 뜨는 경우 대비: '다운로드'/'확인' 버튼이 있으면 누른다.
     try:
-        confirm = WebDriverWait(driver, 4).until(
+        btn.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", btn)
+
+    # 다운로드 옵션 모달/확인이 뜨는 경우 대비: 대화상자 안 '다운로드'/'확인' 버튼을 누른다.
+    try:
+        confirm = WebDriverWait(driver, 5).until(
             EC.element_to_be_clickable(
-                (By.XPATH, "//button[normalize-space(.)='다운로드' or normalize-space(.)='확인']")
+                (By.XPATH, "//div[@role='dialog']//button[contains(.,'다운로드') or normalize-space(.)='확인']")
             )
         )
         confirm.click()
@@ -274,7 +309,12 @@ def main() -> None:
     driver = make_driver(headless=True)
     try:
         do_login(driver)
-        select_company(driver)
+        # 홈의 안내 모달을 피하려 통장내역으로 직행(회사 선택기는 상단바라 여기서도 됨).
+        driver.get(TRANSACTIONS_URL)
+        dismiss_modals(driver)
+        wait_for_data(driver)
+        verify_company(driver)
+        wait_for_data(driver)  # 전환했을 수 있으니 데이터 재확인
         path = download_transactions(driver)
         post_to_finance(path)
         print("\n🎉 완료 — 통장 내역 전송 성공")
@@ -282,9 +322,11 @@ def main() -> None:
         import traceback
         print(f"❌ 실패: {type(e).__name__}: {e}")
         traceback.print_exc()
-        # 실패 화면 스크린샷(디버그용)
+        # 실패 화면 스크린샷 + page.html(디버그용)
         try:
             driver.save_screenshot(os.path.join(downloads_folder, "error.png"))
+            with open(os.path.join(downloads_folder, "page.html"), "w", encoding="utf-8") as f:
+                f.write(driver.page_source[:500000])
         except Exception:
             pass
         sys.exit(1)

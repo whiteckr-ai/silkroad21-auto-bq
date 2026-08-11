@@ -55,11 +55,11 @@ jobs:
           path: log_clobe.txt
           retention-days: 7
 
-      - name: 실패 스크린샷 업로드 (SPA 셀렉터 디버그용)
+      - name: 실패 스크린샷·page.html 업로드 (SPA 셀렉터 디버그용)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: clobe-debug
-          path: downloads_clobe/error.png
+          path: downloads_clobe/
           retention-days: 7
           if-no-files-found: ignore

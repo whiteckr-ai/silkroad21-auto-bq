@@ -101,10 +101,9 @@ def make_driver(headless: bool = True) -> webdriver.Chrome:
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1400,1000")
     options.add_argument("--remote-allow-origins=*")
-    # 자동화 탐지 회피(일부 SPA가 headless/webdriver면 export를 막음)
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
+    # ⚠️ excludeSwitches / useAutomationExtension 은 넣지 말 것 — 이 조합이 로그인 폼 로드를
+    #    막아 로그인 3회 타임아웃을 냈다(실측). AutomationControlled 만 남길 수도 있으나,
+    #    안전하게 known-good 구성으로 되돌린다.
     options.add_experimental_option(
         "prefs",
         {

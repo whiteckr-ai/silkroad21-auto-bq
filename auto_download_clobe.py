@@ -313,7 +313,10 @@ def post_to_finance(path: str) -> None:
 
 # ===== Main =====
 def main() -> None:
-    driver = make_driver(headless=True)
+    # ⚠️ headless=False (진짜 Chrome). headless에서는 클로브 export가 다운로드를 아예 시작하지
+    #    않는다(실측: 로그인·회사·데이터 전부 OK인데 파일이 안 떨어짐). CI에서는 yml이 xvfb(가상
+    #    화면)로 감싸 headed Chrome을 돌린다. 로컬 수동 실행 시엔 실제 창이 잠깐 뜬다.
+    driver = make_driver(headless=False)
     try:
         do_login(driver)
         # 홈의 안내 모달을 피하려 통장내역으로 직행(회사 선택기는 상단바라 여기서도 됨).

@@ -1,0 +1,65 @@
+name: clobe-to-finance
+
+# =====================================================================
+# 클로브(app.clobe.ai) 통장 내역 크롤링 → 재무회계 ERP 직접 전송
+#   트리거: cron-job.org 외부 스케줄러가 workflow_dispatch API를 호출(하루 1회 권장,
+#   매일 오전 전날치 통장 내역 갱신). 더 자주 원하면 스케줄러 주기만 바꾸면 됨.
+#
+#   ⚠️ 파일은 레포 루트에 둘 것: auto_download_clobe.py (payment/packing py와 같은 위치).
+# =====================================================================
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: clobe-to-finance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install selenium requests urllib3
+
+      - name: 클로브 통장 내역 크롤링 → 재무 ERP 전송
+        env:
+          CLOBE_LOGIN_ID: ${{ secrets.CLOBE_LOGIN_ID }}
+          CLOBE_LOGIN_PW: ${{ secrets.CLOBE_LOGIN_PW }}
+          CLOBE_COMPANY_NAME: ${{ secrets.CLOBE_COMPANY_NAME }}    # 선택: 기본 '에스앤피그룹'
+          FINANCE_BANK_URL: ${{ secrets.FINANCE_BANK_URL }}        # http://<서버IP>:8080/api/bank/ingest
+          FINANCE_BANK_KEY: ${{ secrets.FINANCE_BANK_KEY }}        # 선택: 서버 BANK_INGEST_KEY
+          FINANCE_BASIC_USER: ${{ secrets.FINANCE_BASIC_USER }}    # Nginx Basic 인증(직원 접속 계정)
+          FINANCE_BASIC_PASS: ${{ secrets.FINANCE_BASIC_PASS }}
+        run: python auto_download_clobe.py
+
+      - name: 로그 업로드 (실패 시 확인용)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clobe-log
+          path: log_clobe.txt
+          retention-days: 7
+
+      - name: 실패 스크린샷 업로드 (SPA 셀렉터 디버그용)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clobe-debug
+          path: downloads_clobe/error.png
+          retention-days: 7
+          if-no-files-found: ignore

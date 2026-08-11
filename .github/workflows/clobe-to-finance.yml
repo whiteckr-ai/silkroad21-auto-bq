@@ -33,6 +33,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt-get update && sudo apt-get install -y xvfb
           python -m pip install --upgrade pip
           pip install selenium requests urllib3
 
@@ -45,7 +46,9 @@ jobs:
           FINANCE_BANK_KEY: ${{ secrets.FINANCE_BANK_KEY }}        # 선택: 서버 BANK_INGEST_KEY
           FINANCE_BASIC_USER: ${{ secrets.FINANCE_BASIC_USER }}    # Nginx Basic 인증(직원 접속 계정)
           FINANCE_BASIC_PASS: ${{ secrets.FINANCE_BASIC_PASS }}
-        run: python auto_download_clobe.py
+        # ⚠️ xvfb-run: 가상 화면 위에서 headed Chrome 실행. headless면 클로브 export가
+        #    다운로드를 시작조차 안 해서(실측) headed + 가상화면이 필요하다.
+        run: xvfb-run -a python auto_download_clobe.py
 
       - name: 로그 업로드 (실패 시 확인용)
         if: always()

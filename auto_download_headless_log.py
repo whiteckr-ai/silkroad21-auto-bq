@@ -352,7 +352,7 @@ try:
             EC.element_to_be_clickable(
                 (
                     By.CSS_SELECTOR,
-                    "a[onclick*=\"fnPageExl('X14')\"], a[href*=\"fnPageExl('X14')\"]",
+                    "button[onclick*=\"fnPageExl('X19')\"], a[onclick*=\"fnPageExl('X19')\"], a[href*=\"fnPageExl('X19')\"]",
                 )
             )
         )
@@ -361,7 +361,7 @@ try:
     except Exception as e:
         print("[WARN] 버튼 클릭 방식 실패, execute_script로 대체 시도:", e)
         driver.set_script_timeout(10)
-        driver.execute_script("fnPageExl('X14');")
+        driver.execute_script("fnPageExl('X19');")
 
     accept_alert_safe(driver, timeout=5)
     wait_for_download_complete(downloads_folder, timeout=120)

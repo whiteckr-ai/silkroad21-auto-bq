@@ -10,6 +10,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def get_customs_rate(max_retries=3):
+    """관세청 주간 수입환율에서 CNY·USD 고시환율을 함께 조회.
+    반환: {"cny": "211.49", "usd": "1428.8"} 형태(문자열). 실패 시 {}."""
     service_key = "2758a1afe287a2143a6893f6a4d637788f34421745d71f6a5ef93d82ae20f114"
     today = datetime.now().strftime('%Y%m%d')
     url = "https://apis.data.go.kr/1220000/retrieveTrifFxrtInfo/getRetrieveTrifFxrtInfo"
@@ -39,12 +41,22 @@ def get_customs_rate(max_retries=3):
                     time.sleep(5)
                 continue
 
+            # 같은 응답에 통화별 <item>이 들어있다. CNY·USD 둘 다 뽑는다.
+            rates = {}
             for item in root.findall('.//item'):
                 curr = item.find('currSgn')
-                if curr is not None and curr.text == 'CNY':
-                    rate = item.find('fxrt').text
-                    print(f"✅ 관세청 환율 조회 성공 (시도 {attempt}/{max_retries}): {rate}")
-                    return rate
+                fx = item.find('fxrt')
+                if curr is None or fx is None or curr.text is None or fx.text is None:
+                    continue
+                if curr.text == 'CNY':
+                    rates['cny'] = fx.text
+                elif curr.text == 'USD':
+                    rates['usd'] = fx.text
+
+            if rates.get('cny'):
+                print(f"✅ 관세청 환율 조회 성공 (시도 {attempt}/{max_retries}): "
+                      f"CNY {rates.get('cny')} / USD {rates.get('usd')}")
+                return rates
 
             print(f"⚠️ [시도 {attempt}/{max_retries}] 위안화 환율 데이터를 찾을 수 없습니다.")
 
@@ -58,7 +70,7 @@ def get_customs_rate(max_retries=3):
             time.sleep(5)
 
     print("❌ 관세청 API 최종 실패 (재시도 모두 소진)")
-    return None
+    return {}
 
 
 def get_krw_rate():
@@ -117,10 +129,11 @@ def send_to_kdocs(cny_rate, krw_rate):
         print(f"❌ KDocs 연동 에러 발생: {e}")
 
 
-def send_to_packing(cny_rate, krw_rate):
+def send_to_packing(cny_rate, krw_rate, usd_rate=None):
     # 패킹 서버로 환율 전송
     #   cny_rate(관세청 CNY 고시환율) → customs
     #   krw_rate(silkroad21 실크21 환율) → sr
+    #   usd_rate(관세청 USD 고시환율) → usd   ← 운임인보이스 O/FREIGHT·DO용
     #   환경변수 PACKING_RATES_URL, PACKING_INGEST_KEY 필요. 미설정이면 건너뜀.
     import os
     packing_url = os.getenv("PACKING_RATES_URL")
@@ -138,10 +151,13 @@ def send_to_packing(cny_rate, krw_rate):
     payload = {}
     c = _num(cny_rate)
     s = _num(krw_rate)
+    u = _num(usd_rate)
     if c is not None:
         payload["customs"] = c
     if s is not None:
         payload["sr"] = s
+    if u is not None:
+        payload["usd"] = u
     if not payload:
         print("[INFO] 전송할 환율 값 없음 → 패킹 전송 건너뜀")
         return
@@ -158,8 +174,10 @@ def send_to_packing(cny_rate, krw_rate):
 
 if __name__ == "__main__":
     print("🔄 관세청 고시환율 및 krw_rate.txt 조회를 시작합니다...")
-    cny_rate = get_customs_rate()
+    customs = get_customs_rate()          # {"cny": ..., "usd": ...}
+    cny_rate = customs.get("cny")
+    usd_rate = customs.get("usd")
     krw_rate = get_krw_rate()
-    print(f"수신 결과 -> CNY: {cny_rate}, KRW(krw_rate.txt): {krw_rate}")
+    print(f"수신 결과 -> CNY: {cny_rate}, USD: {usd_rate}, KRW(krw_rate.txt): {krw_rate}")
     send_to_kdocs(cny_rate, krw_rate)
-    send_to_packing(cny_rate, krw_rate)
+    send_to_packing(cny_rate, krw_rate, usd_rate)
